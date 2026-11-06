@@ -7,6 +7,8 @@ import sys
 import urllib.request
 import zipfile
 
+for stream in (sys.stdout,sys.stderr):stream.reconfigure(encoding='utf-8')
+
 ROOT=Path(__file__).resolve().parents[1]
 
 

@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  PYTHONUTF8: '1'
 jobs:
   windows:
     runs-on: windows-latest
@@ -17,7 +19,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
-      - run: python -m pip install -r core/requirements.txt pytest ziglang==0.13.0
+      - run: python -m pip install -r core/requirements.txt pytest==8.4.2 ziglang==0.13.0
       - run: python scripts/准备运行时.py win
       - run: python -m pytest -q tests/test_缺陷修复.py
       - run: npm test
