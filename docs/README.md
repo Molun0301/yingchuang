@@ -6,10 +6,10 @@ Windows、Linux 双端背屏壁纸编辑与转换工具。读取本机 Wallpaper
 
 | 系统 | 直接下载 | 使用方式 |
 | --- | --- | --- |
-| Windows x64 | [映窗 0.1.0 免安装包](https://github.com/Molun0301/yingchuang/releases/download/v0.1.0/yingchuang-0.1.0-Windows-x64.zip) | 完整解压后打开“映窗.exe” |
-| Linux x86_64 | [映窗 0.1.0 便携应用包](https://github.com/Molun0301/yingchuang/releases/download/v0.1.0/yingchuang-0.1.0-Linux-x86_64.AppImage) | 赋予执行权限后运行 |
+| Windows x64 | [映窗 0.1.1 免安装包](https://github.com/Molun0301/yingchuang/releases/download/v0.1.1/yingchuang-0.1.1-Windows-x64.zip) | 完整解压后打开“映窗.exe” |
+| Linux x86_64 | [映窗 0.1.1 便携应用包](https://github.com/Molun0301/yingchuang/releases/download/v0.1.1/yingchuang-0.1.1-Linux-x86_64.AppImage) | 赋予执行权限后运行 |
 
-[最新版本页](https://github.com/Molun0301/yingchuang/releases/latest) · [版本说明](公开文档/版本说明-0.1.0.md)
+[最新版本页](https://github.com/Molun0301/yingchuang/releases/latest) · [版本说明](公开文档/版本说明-0.1.1.md)
 
 ## 功能
 
@@ -21,4 +21,4 @@ Windows、Linux 双端背屏壁纸编辑与转换工具。读取本机 Wallpaper
 
 [项目说明与构建方法](公开文档/项目说明.md) · [使用说明](使用说明.txt)
 
-当前版本为 0.1.0。Linux 的启动与主要流程已验证；Windows 原生运行和手机导入尚未实测。复杂三维、自定义着色器、脚本事件及持续脚本未完整迁移，转换差异记录在每个成品目录的“转换报告.json”。
+当前版本为 0.1.1。Windows与Linux实际打包程序的界面和转换检查已通过；手机导入尚未实测。复杂三维、自定义着色器、脚本事件及持续脚本未完整迁移，转换差异记录在每个成品目录的“转换报告.json”。
