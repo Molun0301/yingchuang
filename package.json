@@ -41,6 +41,7 @@
     "files": [
       "dist/**/*",
       "desktop/**/*",
+      "build/icon.png",
       "package.json",
       "!**/*.map"
     ],

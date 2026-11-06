@@ -10,7 +10,8 @@ const {Store}=require('../desktop/store.cjs');
   fs.mkdirSync(output,{recursive:true});
   const data=path.join(output,'数据'),store=new Store(data);
   store.data.settings.roots=[path.join(root,'test-results/窗口样例')];store.save();
-  const app=await electron.launch({args:[root,'--force-device-scale-factor=1.5'],env:{...process.env,YINGCHUANG_DATA_DIR:data,
+  const packaged=process.env.YINGCHUANG_PACKAGED_APP;
+  const app=await electron.launch({...(packaged?{executablePath:path.resolve(packaged)}:{}),args:[...(packaged?[]:[root]),'--force-device-scale-factor=1.5'],env:{...process.env,YINGCHUANG_DATA_DIR:data,
     YINGCHUANG_PYTHON:process.platform==='win32'?path.join(root,'runtime/win/python.exe'):path.join(root,'.venv/bin/python'),YINGCHUANG_DISABLE_GPU:'1'}});
   const errors=[],measurements=[];
   try{

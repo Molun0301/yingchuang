@@ -22,8 +22,11 @@ jobs:
       - run: python -m pytest -q tests/test_缺陷修复.py
       - run: npm test
       - run: npm run build
+      - run: npx electron-builder --win --dir --config.directories.output=release/windows-test --publish never
       - run: python tests/准备界面样例.py
       - run: node tests/窗口验收.cjs
+        env:
+          YINGCHUANG_PACKAGED_APP: release/windows-test/win-unpacked/映窗.exe
       - uses: actions/upload-artifact@v4
         if: always()
         with:
