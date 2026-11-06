@@ -1,0 +1,22 @@
+映窗 0.1.0
+
+Windows：解压免安装包，打开“映窗.exe”。请保留同目录的资源文件。
+Linux：运行 AppImage。程序已包含转换运行时，无需另装 Python。
+
+启动后自动读取本机 Steam 壁纸目录，也可添加目录。点击封面编辑，保存排版模板；多选后选择模板与机型即可批量转换。成品为 .mrc，在 RearEye 壁纸管理器中导入。
+
+支持机型：小米 17 Pro、17 Pro Max、18 Pro、18 Pro Max。预览和导出按所选机型尺寸布局。
+
+原主题参数均从工程读取。复杂三维、自定义着色器及持续脚本仍受转换器能力限制，具体项目列在成品目录“转换报告.json”。
+Windows 原生运行与手机导入尚未实机验证。
+
+开发
+
+安装 Node.js 与 Python 3.12，运行 npm ci，并在项目 .venv 中安装 core/requirements.txt。
+npm run build 后运行 npm start。
+桌面测试：npm test
+转换测试：python -I -m pytest tests --basetemp=test-results/pytest -q
+真实主题测试可用 YINGCHUANG_TEST_THEME 指定猫猫工程目录。
+打包运行时：python -I scripts/准备运行时.py linux 或 win。
+打包应用：npm run package:linux 或 npm run package:win。
+Linux 发布构建建议使用便携 Python 或在目标最低系统版本上构建。

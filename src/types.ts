@@ -1,0 +1,37 @@
+export type RowKey = 'week' | 'date' | 'time';
+export type RowLayout = { visible: boolean; x: number; y: number; size: number; align: 'left' | 'center' | 'right' };
+export type Layout = { scale: number; x: number; y: number; clock: { enabled: boolean; language: 'en' | 'zh'; format: 'auto' | '24' | '12'; seconds: boolean; rows: Record<RowKey, RowLayout> } };
+export type Draft = { version: number; deviceId: string; layout: Layout;
+  appearance: { fonts: Record<RowKey,string>; colors: Record<RowKey,string> };
+  motion: { amount: number; sensitivity: number; smoothing: number; vertical: number; fps: number };
+  properties: Record<string,unknown>; layers: Record<string,Record<string,unknown>> };
+export type Device = { id: string; name: string; series: string; width: number; height: number; safeLeft: number; source: string };
+export type Theme = { id: string; title: string; type: string; preview: string; author: string; workshopId: string; modified: number; propertyCount: number };
+export type Property = { key: string; type: string; label: string; value?: unknown; min?: number; max?: number; step?: number; precision?: number; fraction?: boolean; condition?: string; options?: { label: string; value: unknown }[] };
+export type Template = { id: string; name: string; builtin?: boolean; layout: { scale: number; x: number; y: number; clockEnabled?:boolean; rows: Record<RowKey,RowLayout> } };
+export type QueueItem = { id: string; themeId: string; title: string; deviceId: string; status: 'waiting' | 'running' | 'done' | 'error' | 'cancelled'; progress: number; phase: string; error?: string; path?: string; folder?: string; notes?: number };
+export type Settings = { roots: string[]; outputDirectory: string; deviceId: string };
+export type AppState = { themes: Theme[]; roots: string[]; favorites: string[]; templates: Template[]; settings: Settings; devices: Device[]; queue: QueueItem[]; version: string; platform: string };
+export type FontOption = { label: string; value: string };
+export type SourceLayer = { id: string; name: string; kind: string; visible: boolean; x: number; y: number; text: string; color: string; font?:string; alpha: number; fontsize: number };
+export type ThemeDetail = { theme: Theme; properties: Property[]; draft: Draft;
+  detail: { hasClock: boolean; fonts: FontOption[]; sourceFonts: Partial<Record<RowKey,string>>; sourceColors: Partial<Record<RowKey,string>>;
+    fontIssue: string; layers: SourceLayer[]; sourceSize: [number,number] | null; renderable: boolean; reason?: string } };
+export type SceneLayer = { id: string|number; name?: string; asset: string; video?:string; x: number; y: number; w: number; h: number; rotation: number; motion: number;
+  sequence?: {frames: string[];period: number;times?: number[];mode?: string};travel?: number[][]; fade?: number[][] };
+export type ClockRow = { key: RowKey; w: number; h: number; y: number; nx?: number; ny?: number; visible?: boolean; sourceVisible?:boolean; align?: string;
+  weekdays?: string[]; digits?: string[]; pieces?: { x: number; w: number; digit?: string; asset?: string }[];hourFormat?: string };
+export type Clock = { rows: ClockRow[]; assets: string[]; height: number; half_width: number; margin: number; fonts: Record<string,Record<string,unknown>> };
+export type Preview = { width: number; height: number; title: string; layers: SceneLayer[]; restored: string[]; notes: string[];
+  assetRoot: string; clockRoot: string; clock: Clock|null; config: Record<string,unknown>;videoSource?:string;videoSpeed?:number };
+export type Bridge = {
+  bootstrap(): Promise<AppState>; refresh(): Promise<AppState>; detail(id: string): Promise<ThemeDetail>; fonts(): Promise<FontOption[]>;
+  saveDraft(id: string,draft: Draft): Promise<Draft>; preview(id:string,draft:Draft):Promise<Preview>; clock(id:string,draft:Draft):Promise<Pick<Preview,'clock'|'clockRoot'|'config'>>; cancelPreview():Promise<void>;
+  favorite(id:string):Promise<Partial<AppState>>;saveTemplate(name:string,layout:Layout):Promise<Partial<AppState>>;deleteTemplate(id:string):Promise<Partial<AppState>>;
+  applyTemplate(ids:string[],id:string):Promise<AppState>;settings(settings:Partial<Settings>):Promise<Partial<AppState>>;
+  chooseDirectory(purpose:string):Promise<AppState|null>;removeDirectory(folder:string):Promise<AppState>;chooseFile(kind:string):Promise<string|null>;
+  enqueue(input:{ids:string[];templateId?:string;deviceId?:string}):Promise<QueueItem[]>;cancelQueue(id?:string):Promise<QueueItem[]>;clearQueue():Promise<QueueItem[]>;
+  openTheme(id:string):Promise<void>;openOutput(id?:string):Promise<void>;windowControl(action:string):Promise<void>;
+  onQueue(callback:(items:QueueItem[])=>void):()=>void;onPreviewProgress(callback:(event:{id:string;phase:string;progress:number})=>void):()=>void;
+};
+declare global { interface Window { yingchuang: Bridge } }

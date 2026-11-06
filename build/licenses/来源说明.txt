@@ -1,0 +1,4 @@
+映窗使用 Electron、React、Lucide、QuickJS、Python、Pillow、NumPy、LZ4、fontTools 和 imageio-ffmpeg。
+相关许可证保留在本目录，Python 和 Chromium 的许可同时随各自运行时分发。
+FFmpeg 构建与对应源码说明：https://github.com/imageio/imageio-ffmpeg/tree/v0.6.0
+纹理格式解析参考 RePKG，其 MIT 许可证位于 core/RePKG许可证.txt。

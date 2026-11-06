@@ -1,0 +1,26 @@
+[
+  {
+    "id": "xiaomi-17-pro", "name": "小米 17 Pro", "series": "小米 17 系列",
+    "width": 904, "height": 572, "safeLeft": 0.30,
+    "source": "https://antutu.com/doc/135320",
+    "product": "https://www.mi.com/prod/xiaomi-17-pro"
+  },
+  {
+    "id": "xiaomi-17-pro-max", "name": "小米 17 Pro Max", "series": "小米 17 系列",
+    "width": 976, "height": 596, "safeLeft": 0.30,
+    "source": "https://antutu.com/doc/135320",
+    "product": "https://www.mi.com/prod/xiaomi-17-pro-max"
+  },
+  {
+    "id": "xiaomi-18-pro", "name": "小米 18 Pro", "series": "小米 18 系列",
+    "width": 912, "height": 596, "safeLeft": 0.30,
+    "source": "https://finance.sina.cn/tech/2026-09-23/detail-inisvumx0993132.d.html",
+    "product": "https://www.mi.com/prod/xiaomi-18-pro"
+  },
+  {
+    "id": "xiaomi-18-pro-max", "name": "小米 18 Pro Max", "series": "小米 18 系列",
+    "width": 976, "height": 596, "safeLeft": 0.30,
+    "source": "https://finance.sina.cn/tech/2026-09-23/detail-inisvumx0993132.d.html",
+    "product": "https://www.mi.com/prod/xiaomi-18-pro-max"
+  }
+]

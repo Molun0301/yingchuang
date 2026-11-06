@@ -1,0 +1,90 @@
+{
+  "name": "yingchuang",
+  "version": "0.1.0",
+  "description": "映窗 · 背屏壁纸工作室",
+  "author": "映窗",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "package:linux": "npm run build && electron-builder --linux AppImage --publish never",
+    "package:win": "npm run build && electron-builder --win zip --publish never"
+  },
+  "dependencies": {
+    "lucide-react": "^0.577.0",
+    "quickjs-emscripten": "0.32.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0",
+    "typescript": "^5.9.3",
+    "vite": "8.3.6"
+  },
+  "build": {
+    "appId": "cn.yingchuang.desktop",
+    "productName": "映窗",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "core",
+        "to": "core",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**"
+        ]
+      },
+      {
+        "from": "runtime/${os}",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/licenses",
+        "to": "licenses"
+      }
+    ],
+    "asar": true,
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Graphics",
+      "icon": "build/icon.png",
+      "artifactName": "映窗-${version}-Linux-${arch}.${ext}",
+      "syncDesktopName": true
+    },
+    "win": {
+      "target": [
+        "zip"
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
+      "artifactName": "映窗-${version}-Windows-${arch}.${ext}"
+    },
+    "asarUnpack": [
+      "**/*.wasm"
+    ],
+    "npmRebuild": false
+  },
+  "desktopName": "yingchuang.desktop"
+}
