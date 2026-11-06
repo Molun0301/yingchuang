@@ -17,21 +17,23 @@ export type SourceLayer = { id: string; name: string; kind: string; visible: boo
 export type ThemeDetail = { theme: Theme; properties: Property[]; draft: Draft;
   detail: { hasClock: boolean; fonts: FontOption[]; sourceFonts: Partial<Record<RowKey,string>>; sourceColors: Partial<Record<RowKey,string>>;
     fontIssue: string; layers: SourceLayer[]; sourceSize: [number,number] | null; renderable: boolean; reason?: string } };
-export type SceneLayer = { id: string|number; name?: string; asset: string; video?:string; x: number; y: number; w: number; h: number; rotation: number; motion: number;
+export type SceneLayer = { id: string|number; name?: string; asset: string; video?:string; videoSource?:string; x: number; y: number; w: number; h: number; rotation: number; motion: number;
   sequence?: {frames: string[];period: number;times?: number[];mode?: string};travel?: number[][]; fade?: number[][] };
 export type ClockRow = { key: RowKey; w: number; h: number; y: number; nx?: number; ny?: number; visible?: boolean; sourceVisible?:boolean; align?: string;
   weekdays?: string[]; digits?: string[]; pieces?: { x: number; w: number; digit?: string; asset?: string }[];hourFormat?: string };
 export type Clock = { rows: ClockRow[]; assets: string[]; height: number; half_width: number; margin: number; fonts: Record<string,Record<string,unknown>> };
 export type Preview = { width: number; height: number; title: string; layers: SceneLayer[]; restored: string[]; notes: string[];
-  assetRoot: string; clockRoot: string; clock: Clock|null; config: Record<string,unknown>;videoSource?:string;videoSpeed?:number };
+  assetRoot: string; clockRoot: string; clock: Clock|null; config: Record<string,unknown>;videoSpeed?:number;progressive?:boolean;clockError?:string };
 export type Bridge = {
   bootstrap(): Promise<AppState>; refresh(): Promise<AppState>; detail(id: string): Promise<ThemeDetail>; fonts(): Promise<FontOption[]>;
-  saveDraft(id: string,draft: Draft): Promise<Draft>; preview(id:string,draft:Draft):Promise<Preview>; clock(id:string,draft:Draft):Promise<Pick<Preview,'clock'|'clockRoot'|'config'>>; cancelPreview():Promise<void>;
+  saveDraft(id: string,draft: Draft): Promise<Draft>; preview(id:string,draft:Draft,requestId?:number):Promise<Preview>; clock(id:string,draft:Draft):Promise<Pick<Preview,'clock'|'clockRoot'|'config'>>; cancelPreview():Promise<void>;
+  previewMotion(id:string,requestId:number):Promise<void>;
   favorite(id:string):Promise<Partial<AppState>>;saveTemplate(name:string,layout:Layout):Promise<Partial<AppState>>;deleteTemplate(id:string):Promise<Partial<AppState>>;
   applyTemplate(ids:string[],id:string):Promise<AppState>;settings(settings:Partial<Settings>):Promise<Partial<AppState>>;
   chooseDirectory(purpose:string):Promise<AppState|null>;removeDirectory(folder:string):Promise<AppState>;chooseFile(kind:string):Promise<string|null>;
   enqueue(input:{ids:string[];templateId?:string;deviceId?:string}):Promise<QueueItem[]>;cancelQueue(id?:string):Promise<QueueItem[]>;clearQueue():Promise<QueueItem[]>;
   openTheme(id:string):Promise<void>;openOutput(id?:string):Promise<void>;windowControl(action:string):Promise<void>;
   onQueue(callback:(items:QueueItem[])=>void):()=>void;onPreviewProgress(callback:(event:{id:string;phase:string;progress:number})=>void):()=>void;
+  onPreviewReady(callback:(event:{id:string;requestId:number;data?:Preview;error?:string})=>void):()=>void;
 };
 declare global { interface Window { yingchuang: Bridge } }

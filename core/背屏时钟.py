@@ -173,7 +173,7 @@ def write_glyph(stage, file, text, font, width, height, bounds, color):
     x = (image.width - right + left) / 2 - left
     baseline = (image.height - bottom + top) / 2 - top
     ImageDraw.Draw(image).text((x, baseline), text, anchor="ls", font=font, fill=color)
-    image.save(stage / file, optimize=True)
+    image.save(stage / file, compress_level=1)
 
 
 def number_row(stage, font, key, fields, punctuation, color):

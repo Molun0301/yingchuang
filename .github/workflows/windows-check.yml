@@ -1,0 +1,31 @@
+name: Windows 界面与转换检查
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: python -m pip install -r core/requirements.txt pytest ziglang==0.13.0
+      - run: python scripts/准备运行时.py win
+      - run: python -m pytest -q tests/test_缺陷修复.py
+      - run: npm test
+      - run: npm run build
+      - run: python tests/准备界面样例.py
+      - run: node tests/窗口验收.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-ui-check
+          path: test-results/窗口验收

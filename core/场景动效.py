@@ -33,10 +33,12 @@ def as_albedo(image, texture_format):
 
 
 class SceneAssets:
-    def __init__(self, package, stage, decode_texture):
+    def __init__(self, package, stage, decode_texture, fast=False):
         self.package = package
         self.stage = stage
         self.decode_texture = decode_texture
+        self.fast = fast
+        self.textures = {}
         self.saved = {}
         self.animated_pixels = 0
         libraries = [p for p in package.path.parents if p.name.lower() == "steamapps"]
@@ -75,9 +77,19 @@ class SceneAssets:
         path = name if name.startswith("materials/") else "materials/" + name
         if not path.lower().endswith((".tex", ".png", ".jpg", ".jpeg", ".webp")):
             path += ".tex"
+        if path in self.textures:
+            return self.textures[path]
         if self.package.has(path):
-            return self.package.read(path)
-        return self.builtin(path)
+            data = self.package.read(path)
+        else:
+            data = self.builtin(path)
+        self.textures[path] = data
+        return data
+
+    def is_video(self, name):
+        data = self.texture_bytes(name)
+        return bool(data and len(data)>=26 and data.startswith(b"TEXV0005\0TEXI0001\0")
+                    and struct.unpack_from("<I",data,22)[0]&32)
 
     def is_atlas(self, name):
         data = self.texture_bytes(name)
@@ -97,6 +109,7 @@ class SceneAssets:
             return image.convert("RGBA")
 
     def write(self, name, image, use_webp=True, *, lossless=False):
+        if self.fast:use_webp=False
         file = "assets/" + name + (".webp" if use_webp else ".png")
         if file not in self.saved:
             path = self.stage / file
@@ -104,7 +117,7 @@ class SceneAssets:
                 # 保留透明度，按背屏尺寸压缩以减少逐帧解码负担。
                 image.save(path, quality=89, method=4 if not lossless else 2, exact=False, lossless=lossless)
             else:
-                image.save(path, optimize=True)
+                image.save(path, optimize=not self.fast, compress_level=1 if self.fast else 6)
             self.saved[file] = [image.width, image.height]
         return file
 
@@ -198,7 +211,7 @@ def sample_scalar(rng, setting, default, limit):
 def sprite_assets(assets, texture, material, name, descriptor, color):
     style = {"blend": material.get("blending", "normal"), "color": color}
     if assets.is_atlas(texture):
-        frames = atlas_frames(assets, texture)
+        frames = atlas_frames(assets, texture, first_only=assets.fast)
         if len(frames) > 1:
             # 扑翼、发光、雾等共用贴图帧读取器。
             raw_speed = descriptor.get("sequencemultiplier")
@@ -351,7 +364,9 @@ def sprite_tracks(assets, obj, state, sw, sh, name, limit, properties):
         if prewarm:
             path,fade = prewarm_track(path,prewarm),prewarm_track(fade,prewarm)
         rotation = initial.get("rotationrandom", {})
-        angle = rng.uniform(float(rotation.get("min", 0)),float(rotation.get("max", 0)))
+        def angle_value(raw):
+            return float(raw) if isinstance(raw,(int,float)) else numbers(raw,[0,0,0])[-1]
+        angle = rng.uniform(angle_value(rotation.get("min",0)),angle_value(rotation.get("max",0)))
         width = size*scale_x/factor
         height = size*scale_y/factor
         layers.append({"id": f"{name}_{len(layers)}", "name": obj.get("name",name), "x":0,"y":0,
@@ -395,7 +410,7 @@ def cloud_overlay(assets, spec, width, height, count):
 
 
 def source_text(assets, obj, geometry):
-    text = obj.get("text")
+    text = property_default(obj.get("text"),{})
     if not isinstance(text,str) or not text.strip() or len(text)>1000:
         raise ValueError("脚本文字由手机时钟替代")
     font_path = obj.get("font")
@@ -403,7 +418,7 @@ def source_text(assets, obj, geometry):
         raise ValueError("缺少原文字字体")
     size = tuple(max(1,min(1200,round(x))) for x in geometry)
     image = Image.new("RGBA",size)
-    pixels = max(8,min(size[1]//2,round(float(obj.get("pointsize",32))*1.95)))
+    pixels = max(8,min(size[1]//2,round(float(property_default(obj.get("fontsize",obj.get("pointsize",32)),{}))*1.95)))
     font = ImageFont.truetype(BytesIO(assets.read(font_path)),pixels)
     ImageDraw.Draw(image).text((size[0]/2,size[1]/2),text,font=font,anchor="mm",fill="white")
     return image
@@ -425,6 +440,13 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
             layer["color"] = [left*right for left,right in zip(layer["color"],values)]
         if name=="color_grading":
             base = grade_pixels(base,scalar(spec,"brightness",0,-1,1),scalar(spec,"contrast",0,-1,1))
+    if layer.get("videoSource"):
+        if not assets.fast:
+            from 视频处理 import encode
+            layer["video"]="assets/"+key+".mp4"
+            encode(layer.pop("videoSource"),assets.stage/layer["video"],assets.fps)
+        layer["asset"]=assets.write(key,finish_frame(base,layer,grade))
+        return ["场景内嵌视频"]
     frames = None
     period = 0
     lossless = False
@@ -435,7 +457,7 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
                 raise ValueError("骨骼没有启用的动画")
             track=tracks[0]
             rig=decode_rig(assets.read(layer["puppet"]), track["animation"])
-            generated=render_cycle(rig,base,float(track.get("rate",1)),float(track.get("blend",1)),layout_size=layer["native_size"])
+            generated=render_cycle(rig,base,float(track.get("rate",1)),float(track.get("blend",1)),layout_size=layer["native_size"],first_only=assets.fast)
             image,bounds,period=next(generated)
             left,bottom,right,top=bounds
             native_w,native_h=layer["native_size"]
@@ -451,6 +473,10 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
                 notes.append(f"{layer['name']} · 使用首个启用的骨骼动画，其余叠加动画未转换")
         except ASSET_ERRORS as exc:
             notes.append(f"{layer['name']} · 骨骼动画，{exc}")
+    if assets.fast:
+        if frames is not None:base=next(iter(frames))
+        layer["asset"]=assets.write(key,finish_frame(base,layer,grade))
+        return used
     if frames is None and layer.get("atlas"):
         try:
             images=atlas_frames(assets,layer["atlas"],trim=False)
@@ -487,8 +513,9 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
     return used
 
 
-def build_motion_scene(package, scene, properties, layers, worlds, stage, decode_texture, geometry, notes):
-    assets = SceneAssets(package, stage, decode_texture)
+def build_motion_scene(package, scene, properties, layers, worlds, stage, decode_texture, geometry, notes, fast=False, fps=30):
+    assets = SceneAssets(package, stage, decode_texture, fast=fast)
+    assets.fps = fps
     sw,sh = (float(scene["general"]["orthogonalprojection"][axis]) for axis in ("width","height"))
     layers_by_id={layer["id"]:layer for layer in layers}
     objects=scene["objects"]
@@ -500,8 +527,12 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             if name=="color_grading":
                 grade=scalar(spec,"brightness",0,-1,1),scalar(spec,"contrast",0,-1,1)
     result, restored, particle_count=[],[],0
+    ignored_mouse=[]
     pending_emitters = sum(bool(obj.get("particle")) and (worlds.get(obj["id"]) or {}).get("alpha",0)>0 for obj in objects)
     object_specs = {obj["id"]: effects_for(obj, properties) for obj in objects if worlds.get(obj["id"])}
+    for identifier,specs in object_specs.items():
+        if any(kind=='cursorripple' for kind,_ in specs):ignored_mouse.append(str(identifier)+':cursorripple')
+        object_specs[identifier]=[(kind,spec) for kind,spec in specs if kind!='cursorripple']
     pending_surfaces = sum(
         any(kind in WARP_EFFECTS for kind,_ in object_specs.get(layer["id"], [])) for layer in layers
     )
@@ -534,6 +565,10 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             result.append(layer)
         elif isinstance(obj.get("particle"),str) and obj["particle"]:
             try:
+                descriptor=assets.json(obj['particle'])
+                if any((point.get('flags',0) or 0)&1 for point in descriptor.get('controlpoint',[])):
+                    ignored_mouse.append(name)
+                    continue
                 if particle_count>=PARTICLE_LIMIT:
                     raise ValueError("已到粒子图层上限")
                 share = max(1, (PARTICLE_LIMIT-particle_count)//max(1,pending_emitters))
@@ -550,7 +585,7 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                 pending_emitters -= 1
         elif obj.get("sound"):
             notes.append(f"{name} · 音轨暂未转换")
-        elif isinstance(obj.get("text"),str) and obj["text"].strip():
+        elif isinstance(property_default(obj.get("text"),{}),str) and property_default(obj["text"],{}).strip():
             try:
                 size=vector_values(obj.get("size"),[300,100])
                 image=source_text(assets,obj,size)
@@ -568,8 +603,11 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                     try:
                         size=vector_values(obj.get("size"),[sw,sh])
                         layer={"id":f"{obj['id']}_overlay_{effect_index}","name":name,**geometry(state,size,sh)}
-                        layer["sequence"]=assets.sequence(f"{key}_clouds_{effect_index}",cloud_overlay(assets,spec,*size[:2],18),5600)
-                        layer["asset"]=layer["sequence"]["frames"][0]
+                        if fast:
+                            layer["asset"]=assets.write(key+"_clouds",next(cloud_overlay(assets,spec,*size[:2],18)))
+                        else:
+                            layer["sequence"]=assets.sequence(f"{key}_clouds_{effect_index}",cloud_overlay(assets,spec,*size[:2],18),5600)
+                            layer["asset"]=layer["sequence"]["frames"][0]
                         layer["image"]=Image.open(stage/layer["asset"]).convert("RGBA")
                         result.append(layer)
                         restored.append("雾尘纹理流动")
@@ -577,7 +615,7 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                         notes.append(f"{name} · 雾尘，{exc}")
                 elif effect not in {"blurprecise"}:
                     notes.append(f"{name} · 合成层效果 {effect} 暂未转换")
-    details={"原图层数":len(layers),"粒子图层数":particle_count,"动效位图数":len(assets.saved),
+    details={"原图层数":len(layers),"粒子图层数":particle_count,"动效位图数":len(assets.saved),"按用户要求忽略的鼠标交互":ignored_mouse,
              "解码像素上界":sum(w*h for w,h in assets.saved.values())}
     return result,list(dict.fromkeys(restored)),details
 
@@ -889,7 +927,7 @@ def depth_frames(assets, image, spec, count=13):
         yield unpremultiplied(bilinear(source, u+shift, v))
 
 
-def atlas_frames(assets, texture_name, trim=True):
+def atlas_frames(assets, texture_name, trim=True, first_only=False):
     data = assets.texture_bytes(texture_name)
     if data is None or not data.startswith(b"TEXV0005\0TEXI0001\0"):
         raise ValueError("纹理图集缺失或格式不受支持")
@@ -906,7 +944,7 @@ def atlas_frames(assets, texture_name, trim=True):
     struct.pack_into("<I", single, 22, flags & ~4)
     atlas = as_albedo(assets.decode_texture(single), texture_format)
     frames = []
-    for index in range(count):
+    for index in range(1 if first_only else count):
         fmt = "<If6i" if data[offset:offset+8] == b"TEXS0001" else "<I7f"
         image_id, _, x, y, xx, xy, yx, yy = struct.unpack_from(fmt, data, start + index * 32)
         width, height = round(math.hypot(xx, xy)), round(math.hypot(yx, yy))

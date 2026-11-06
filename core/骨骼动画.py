@@ -1,6 +1,11 @@
 """读取平面蒙皮网格并离线生成透明动画帧。"""
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+import ctypes
+import os
+import sys
 import math
 import struct
 
@@ -176,35 +181,35 @@ def skin_pose(rig, phase, blend=1.0):
     return np.einsum("vb,vbi->vi", rig.weights, moved)[:, :2]
 
 
+@lru_cache(maxsize=1)
+def native_raster():
+    if os.environ.get("YINGCHUANG_RUNTIME"):directory=Path(os.environ["YINGCHUANG_RUNTIME"])
+    elif getattr(sys,"frozen",False):directory=Path(sys.executable).parent
+    elif os.environ.get("YINGCHUANG_CORE"):directory=Path(os.environ["YINGCHUANG_CORE"]).parent/"runtime"
+    else:directory=Path(__file__).resolve().parents[1]/"runtime"/("win" if sys.platform=="win32" else "linux")
+    library=ctypes.CDLL(str(directory/("scene-raster.dll" if sys.platform=="win32" else "scene-raster.so")))
+    function=library.raster_mesh
+    pointer=ctypes.c_void_p
+    function.argtypes=[pointer,pointer,pointer,ctypes.c_int,pointer,ctypes.c_int,ctypes.c_int,pointer,ctypes.c_int,ctypes.c_int]
+    function.restype=None
+    return function
+
+
 def raster_frame(rig, positions, texture, size, bounds):
-    """把每个蒙皮三角形的纹理坐标插值到目标像素。"""
-    w, h = size
-    left, bottom, right, top = bounds
-    points = (positions - [left, top]) * [w / (right - left), -h / (top - bottom)]
-    sample = np.zeros((h, w, 2), dtype=np.float32)
-    covered = np.zeros((h, w), dtype=bool)
-    for triangle in rig.triangles:
-        p = points[triangle]
-        x0, y0 = np.maximum(0, np.floor(p.min(axis=0)).astype(int))
-        x1, y1 = np.minimum([w, h], np.ceil(p.max(axis=0)).astype(int))
-        if x1 <= x0 or y1 <= y0:
-            continue
-        a, b = p[1] - p[0], p[2] - p[0]
-        det = a[0] * b[1] - a[1] * b[0]
-        if abs(det) < 1e-7:
-            continue
-        xx = np.arange(x0, x1) + .5 - p[0, 0]
-        yy = (np.arange(y0, y1) + .5 - p[0, 1])[:, None]
-        u = (xx * b[1] - yy * b[0]) / det
-        v = (yy * a[0] - xx * a[1]) / det
-        inside = (u >= -1e-6) & (v >= -1e-6) & (u + v <= 1 + 1e-6)
-        uv = rig.uv[triangle]
-        sample[y0:y1, x0:x1][inside] = uv[0] + u[inside, None] * (uv[1] - uv[0]) + v[inside, None] * (uv[2] - uv[0])
-        covered[y0:y1, x0:x1] |= inside
-    frame = np.zeros((h, w, 4), dtype=np.uint8)
-    uv = sample[covered]
-    frame[covered] = np.rint(bilinear(texture, uv[:, 0], uv[:, 1])).astype(np.uint8)
-    return Image.fromarray(frame)
+    """原生三角形光栅化，保留网格重叠的透明混合顺序。"""
+    w,h=size
+    left,bottom,right,top=bounds
+    points=np.ascontiguousarray((positions-[left,top])*[w/(right-left),-h/(top-bottom)],dtype=np.float32)
+    uv=np.ascontiguousarray(rig.uv,dtype=np.float32)
+    if not np.isfinite(points).all() or not np.isfinite(uv).all():
+        raise ValueError('骨骼坐标或纹理坐标不是有限数字')
+    triangles=np.ascontiguousarray(rig.triangles,dtype=np.int32)
+    texture=np.ascontiguousarray(texture,dtype=np.uint8)
+    frame=np.zeros((h,w,4),dtype=np.float32)
+    native_raster()(points.ctypes.data,uv.ctypes.data,triangles.ctypes.data,len(triangles),
+                    texture.ctypes.data,texture.shape[1],texture.shape[0],frame.ctypes.data,w,h)
+    frame[:,:,:3]/=np.maximum(frame[:,:,3:],1e-8)
+    return Image.fromarray(np.clip(np.rint(frame*255),0,255).astype(np.uint8))
 
 
 def bilinear(texture, u, v, repeat=False):
@@ -225,7 +230,7 @@ def bilinear(texture, u, v, repeat=False):
             + (texture[bottom, left] * (1 - dx) + texture[bottom, right] * dx) * dy)
 
 
-def render_cycle(rig, image, rate, blend, output_fps=16, layout_size=None):
+def render_cycle(rig, image, rate, blend, output_fps=16, layout_size=None, first_only=False):
     if not 0 < rate <= 4 or not 0 <= blend <= 1:
         raise ValueError("骨骼播放倍率或权重无效")
     period=rig.frame_count*(2 if rig.mode=="mirror" else 1)
@@ -234,7 +239,7 @@ def render_cycle(rig, image, rate, blend, output_fps=16, layout_size=None):
         raise ValueError("骨骼循环过长")
     limit=max(12,min(240,200000//len(rig.triangles)))
     frames=max(2,min(limit,math.ceil(duration*output_fps)))
-    poses=[skin_pose(rig,i*period/frames,blend) for i in range(frames)]
+    poses=[skin_pose(rig,i*period/frames,blend) for i in range(1 if first_only else frames)]
     sw,sh=layout_size or image.size
     low = np.minimum(np.min(poses, axis=(0, 1)) - 2, [-sw / 2, -sh / 2])
     high = np.maximum(np.max(poses, axis=(0, 1)) + 2, [sw / 2, sh / 2])

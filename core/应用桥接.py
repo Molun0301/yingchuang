@@ -25,7 +25,7 @@ from 场景动效 import build_motion_scene
 if os.environ.get("YINGCHUANG_CORE"):
     converter.ROOT = Path(os.environ["YINGCHUANG_CORE"])
 
-CACHE_VERSION = 6
+CACHE_VERSION = 9
 ROLE_KEYS = dict(zip(clockwork.ROLES, ("week", "date", "time")))
 
 
@@ -84,12 +84,23 @@ class EditablePackage:
                 prop["value"] = name
 
     def has(self, name):
-        return name in self.files or self.original.has(name)
+        return name in self.files or self.original.has(name) or self.builtin(name) is not None
+
+    def builtin(self, name):
+        relative=converter.safe_name(name)
+        for root in self.engine_roots:
+            candidate=(root/relative).resolve()
+            if candidate.is_relative_to(root.resolve()) and candidate.is_file():return candidate
+        return None
 
     def read(self, name):
         if name in self.files:
             return self.files[name].read_bytes()
-        data = self.original.read(name)
+        if self.original.has(name):data = self.original.read(name)
+        else:
+            builtin=self.builtin(name)
+            if builtin is None:raise converter.ConversionError("原主题与壁纸引擎均缺少资源："+name)
+            data=builtin.read_bytes()
         if name.lower().endswith(".json"):
             try:
                 return json.dumps(binding(json.loads(data), self.properties), ensure_ascii=False).encode()
@@ -185,8 +196,12 @@ def inspect_theme(request):
                        "font":clockwork.theme_value(obj.get("font"),props),
                        "alpha": float(converter.value(obj.get("alpha"), 1)),
                        "fontsize": float(converter.value(obj.get("fontsize"), 32))})
+    _,_,original,_,_,original_props=converter.read_scene(Path(theme["source"]))
+    clock_ids=[obj["id"] for obj in original["objects"] if "text" in obj and isinstance(converter.value(obj["text"],""),str)
+               and clockwork.clock_roles(obj,converter.value(obj["text"],""))]
     return {"hasClock": has_clock, "fonts": fonts, "sourceFonts": source_fonts, "sourceColors": source_colors,
-            "fontIssue": font_issue, "layers": layers, "sourceSize": [width,height], "renderable": True}
+            "fontIssue": font_issue, "layers": layers, "sourceSize": [width,height], "renderable": True,
+            "scriptInput":{"scene":original,"properties":original_props,"width":width,"height":height,"clockLayerIds":clock_ids}}
 
 
 def config_for(draft, device):
@@ -218,6 +233,8 @@ def graphic_key(theme, draft):
     identity={"version": CACHE_VERSION, "path": str(source), "mtime": stat.st_mtime_ns, "size": stat.st_size,"files":file_versions,
                    "properties": draft.get("properties",{}), "layers": draft.get("layers",{}),
                    "clock": draft["layout"]["clock"]["enabled"], "engineRoots": theme.get("engineRoots",[]),"script":theme.get("scriptSignature")}
+    if theme["type"] in {"video","scene"}:
+        identity["fps"]=draft["motion"]["fps"]
     if theme["type"]=="video":
         identity.update(videoVersion=1,fps=draft["motion"]["fps"])
         identity.pop("clock")
@@ -225,9 +242,11 @@ def graphic_key(theme, draft):
     return digest(identity)
 
 
-def prepare_graphics(request):
+def prepare_graphics(request, fast=False):
     theme, draft = request["theme"], request["draft"]
-    root = Path(request["cacheRoot"])/"scenes"/graphic_key(theme,draft)
+    key=graphic_key(theme,draft)
+    root = Path(request["cacheRoot"])/"scenes"/key
+    if fast and not (root/"场景.json").is_file():root=Path(request["cacheRoot"])/"previews"/key
     saved = root/"场景.json"
     if saved.is_file(): return root, json.loads(saved.read_text(encoding="utf-8"))
     root.parent.mkdir(parents=True, exist_ok=True)
@@ -236,18 +255,21 @@ def prepare_graphics(request):
         stage = Path(scratch)/"data"
         (stage/"assets").mkdir(parents=True)
         config = config_for(draft,request["device"])
+        if fast:config["纹理最长边"]=1280
         notes, details = [], {}
         if theme["type"] == "scene":
             data = loaded_scene(theme,draft)
             pkg,project,scene,sw,sh,props = data
             worlds = converter.world_transforms(scene["objects"],props,sw,sh,notes)
             for obj in scene["objects"]:
+                if "text" not in obj:continue
                 raw = converter.value(obj.get("text"), "")
                 if isinstance(raw,str) and clockwork.clock_roles(obj,raw): worlds[obj["id"]] = None
-            _,_,layers,layer_notes,name = converter.scene_layers(Path(theme["source"]),config,data,worlds)
+            media_root=Path(request["cacheRoot"])/"media"/digest([theme["source"],Path(theme["source"]).stat().st_mtime_ns])
+            _,_,layers,layer_notes,name = converter.scene_layers(Path(theme["source"]),config,data,worlds,stage,media_root,fast)
             notes.extend(layer_notes)
-            event("生成场景动效", 22)
-            layers,restored,details = build_motion_scene(pkg,scene,props,layers,worlds,stage,converter.decode_tex,converter.layer_geometry,notes)
+            event("读取图层" if fast else "生成场景动效", 22)
+            layers,restored,details = build_motion_scene(pkg,scene,props,layers,worlds,stage,converter.decode_tex,converter.layer_geometry,notes,fast=fast,fps=draft["motion"]["fps"])
             script_result=theme.get("scriptResult",{})
             if script_result.get("evaluated"):
                 restored.append("脚本属性初始状态")
@@ -260,18 +282,22 @@ def prepare_graphics(request):
             name = theme["title"]
         elif theme["type"] == "video":
             from 视频处理 import metadata,poster,encode
-            original=encode(theme["source"],stage/"assets/wallpaper.mp4",draft["motion"]["fps"],draft.get("properties",{}).get("__videoSpeed",1),event)
-            info=metadata(stage/"assets/wallpaper.mp4")
+            if fast:
+                info=metadata(theme["source"]);original=info
+                video_source=theme["source"]
+            else:
+                original=encode(theme["source"],stage/"assets/wallpaper.mp4",draft["motion"]["fps"],draft.get("properties",{}).get("__videoSpeed",1),event)
+                info=metadata(stage/"assets/wallpaper.mp4");video_source=stage/"assets/wallpaper.mp4"
             sw,sh=info["source_size"]
-            poster(stage/"assets/wallpaper.mp4",stage/"assets/poster.jpg")
-            layers=[{"id":"video","asset":"assets/poster.jpg","video":"assets/wallpaper.mp4","x":sw/2,"y":sh/2,"w":sw,"h":sh,"rotation":0,"motion":1}]
+            poster(video_source,stage/"assets/poster.jpg")
+            layers=[{"id":"video","asset":"assets/poster.jpg",**({"videoSource":str(video_source)} if fast else {"video":"assets/wallpaper.mp4"}),"x":sw/2,"y":sh/2,"w":sw,"h":sh,"rotation":0,"motion":1}]
             restored=["视频播放"]
             details={"原视频尺寸":original.get("source_size"),"输出视频尺寸":[sw,sh],"时长":info.get("duration"),"帧率":info.get("fps")}
         else:
             raise ValueError("此类主题的背屏转换尚未接入。")
         clean = [{k:v for k,v in layer.items() if k not in {"image","native_size","atlas","puppet"}} for layer in layers]
         if not clean: raise ValueError("主题中没有可输出的画面图层。")
-        payload = {"width":sw,"height":sh,"title":theme["title"],"layers":clean,"restored":restored,"notes":list(dict.fromkeys(notes)),"details":details}
+        payload = {"width":sw,"height":sh,"title":theme["title"],"layers":clean,"restored":restored,"notes":list(dict.fromkeys(notes)),"details":details,"progressive":fast and theme["type"]!="image"}
         atomic_json(stage/"场景.json",payload)
         commit_cache(stage,root,"场景.json")
     return root,payload
@@ -323,6 +349,7 @@ def prepare_clock(request,config):
         worlds=converter.world_transforms(scene["objects"],props,w,h,[])
         candidates={key:[] for key in ROLE_KEYS.values()}
         for obj in scene["objects"]:
+            if "text" not in obj:continue
             raw=converter.value(obj.get("text"),"")
             if not isinstance(raw,str):continue
             for role in clockwork.clock_roles(obj,raw):candidates[ROLE_KEYS[role]].append((obj,raw))
@@ -353,15 +380,18 @@ def prepare_clock(request,config):
     return root,clock
 
 
-def prepare(request):
-    root,payload = prepare_graphics(request)
+def prepare(request, fast=False):
+    root,payload = prepare_graphics(request,fast=fast)
     event("更新排版",94 if request["theme"]["type"]=="video" else 85)
     config = config_for(request["draft"],request["device"])
-    clock_root,clock = prepare_clock(request,config)
+    try:clock_root,clock = prepare_clock(request,config)
+    except ValueError as exc:
+        if request.get("operation")=="export":raise
+        clock_root,clock=None,None
+        payload={**payload,"clockError":str(exc)}
     result={**payload,"config":config,"clock":clock,"assetRoot":str(root),"clockRoot":str(clock_root) if clock_root else None}
     if request["theme"]["type"]=="video":
-        result["videoSource"]=str(root/"assets/wallpaper.mp4")
-        result["videoSpeed"]=request["draft"].get("properties",{}).get("__videoSpeed",1)
+        result["videoSpeed"]=1 if payload.get("progressive") else request["draft"].get("properties",{}).get("__videoSpeed",1)
     return result
 
 
@@ -418,16 +448,17 @@ def main():
         if hasattr(stream,"reconfigure"):stream.reconfigure(encoding="utf-8")
     request = json.loads(sys.stdin.readline())
     operation = request.get("operation")
-    if operation in {"preview","export","clock"}:
+    if operation in {"preview","motion-preview","export","clock"}:
         Path(request["cacheRoot"]).mkdir(parents=True,exist_ok=True)
         Path(request["scratchRoot"]).mkdir(parents=True,exist_ok=True)
     if operation == "script-input":
         _,_,scene,width,height,properties=loaded_scene(request["theme"],request["draft"])
-        clock_ids=[obj["id"] for obj in scene["objects"] if isinstance(converter.value(obj.get("text"),""),str) and clockwork.clock_roles(obj,converter.value(obj.get("text"),""))]
+        clock_ids=[obj["id"] for obj in scene["objects"] if "text" in obj and isinstance(converter.value(obj.get("text"),""),str) and clockwork.clock_roles(obj,converter.value(obj.get("text"),""))]
         result={"scene":scene,"width":width,"height":height,"properties":properties,"clockLayerIds":clock_ids}
     elif operation == "inspect": result = inspect_theme(request)
     elif operation == "fonts": result = list_fonts()
-    elif operation == "preview": result = prepare(request)
+    elif operation == "preview": result = prepare(request,fast=True)
+    elif operation == "motion-preview": result = prepare(request)
     elif operation == "export": result = export(request)
     elif operation == "clock":
         config=config_for(request["draft"],request["device"])

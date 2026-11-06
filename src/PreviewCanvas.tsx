@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Device, Draft, Layout, Preview, RowKey, SceneLayer } from './types';
 
 type Props = { preview: Preview|null; draft: Draft; device: Device; poster: string; playing: boolean; tilt: boolean; mask: boolean;
-  selected: RowKey|null; onSelect:(key:RowKey|null)=>void; onLayout:(layout:Layout)=>void };
+  selected: RowKey|null; onSelect:(key:RowKey|null)=>void; onLayout:(layout:Layout)=>void; onReady:()=>void;onError:(message:string)=>void };
 type Box = { key:RowKey; x:number; y:number; w:number; h:number };
 const clamp=(value:number,min=0,max=1)=>Math.max(min,Math.min(max,value));
 const roleName={week:'星期',date:'日期',time:'时间'};
@@ -26,8 +26,8 @@ function frameFile(layer:SceneLayer,ms:number,tilt:number):string {
 }
 async function loadImages(root:string,files:string[]):Promise<Map<string,HTMLImageElement>> {
   const images=new Map<string,HTMLImageElement>();
-  await Promise.all([...new Set(files)].map(file=>new Promise<void>(resolve=>{
-    const img=new Image();img.onload=()=>{images.set(file,img);resolve();};img.onerror=()=>resolve();
+  await Promise.all([...new Set(files)].map(file=>new Promise<void>((resolve,reject)=>{
+    const img=new Image();img.onload=()=>{images.set(file,img);resolve();};img.onerror=()=>reject(new Error('无法读取预览资源：'+file));
     img.src=root+file.split('/').map(encodeURIComponent).join('/');
   })));
   return images;
@@ -40,27 +40,55 @@ export function PreviewCanvas(props:Props) {
   const boxes=useRef<Box[]>([]),pointer=useRef({x:0,y:0}),elapsed=useRef(0),motion=useRef({x:0,y:0});
   const drag=useRef<{key:RowKey|'scene';x:number;y:number;layout:Layout}|null>(null);
   const [ready,setReady]=useState(false);
-  const video=useRef<HTMLVideoElement|null>(null);
+  const videos=useRef(new Map<string|number,HTMLVideoElement>()),loadedRoot=useRef(''),paintedRoot=useRef('');
+  const videoKey=JSON.stringify(props.preview?.layers.filter(l=>l.videoSource).map(l=>[l.id,l.videoSource]));
   useEffect(()=>{
-    if(!props.preview?.videoSource){video.current=null;return;}
-    const element=document.createElement('video');element.muted=true;element.loop=true;element.preload='auto';element.src=props.preview.videoSource;video.current=element;
-    if(props.playing)void element.play().catch(()=>{});
-    return()=>{element.pause();element.removeAttribute('src');element.load();video.current=null;};
-  },[props.preview?.videoSource]);
-  useEffect(()=>{const element=video.current;if(!element)return;element.playbackRate=Number(props.draft.properties.__videoSpeed??1)/(props.preview?.videoSpeed||1);if(props.playing)void element.play().catch(()=>{});else element.pause();},[props.playing,props.draft.properties.__videoSpeed,props.preview?.videoSpeed]);
+    const elements=new Map<string|number,HTMLVideoElement>();
+    for(const layer of props.preview?.layers||[]){
+      if(!layer.videoSource)continue;
+      const element=document.createElement('video');element.muted=true;element.loop=true;element.preload='auto';element.src=layer.videoSource;
+      element.playbackRate=Number(current.current.draft.properties.__videoSpeed??1)/(current.current.preview?.videoSpeed||1);
+      if(current.current.playing)void element.play().catch(()=>{});elements.set(layer.id,element);
+    }
+    videos.current=elements;
+    return()=>{for(const element of elements.values()){element.pause();element.removeAttribute('src');element.load();}elements.clear();};
+  },[videoKey]);
+  useEffect(()=>{for(const element of videos.current.values()){element.playbackRate=Number(props.draft.properties.__videoSpeed??1)/(props.preview?.videoSpeed||1);if(props.playing)void element.play().catch(()=>{});else element.pause();}},[props.playing,props.draft.properties.__videoSpeed,props.preview?.videoSpeed]);
   useEffect(()=>{
     let cancelled=false;setReady(false);
+    loadedRoot.current='';paintedRoot.current='';if(canvas.current)canvas.current.dataset.sceneReady='false';
     if(!props.preview){graphics.current.clear();return;}
-    const files=props.preview.layers.flatMap(l=>[l.asset,...(l.sequence?.frames||[])]);
-    void loadImages(props.preview.assetRoot,files).then(value=>{if(!cancelled){graphics.current=value;setReady(true);elapsed.current=0;}});
+    const preview=props.preview;
+    void loadImages(preview.assetRoot,preview.layers.map(l=>l.asset)).then(async value=>{
+      if(cancelled)return;
+      graphics.current=value;loadedRoot.current=preview.assetRoot;setReady(true);elapsed.current=0;
+      const files=preview.layers.flatMap(l=>l.sequence?.frames||[]).filter(f=>!value.has(f));
+      // 第一帧绘制后再解码余下动画帧，避免长动画阻塞编辑。
+      for(let i=0;i<files.length&&!cancelled;i+=6){
+        const batch=await loadImages(preview.assetRoot,files.slice(i,i+6));
+        if(!cancelled)for(const [key,image]of batch)value.set(key,image);
+      }
+    }).catch(error=>{if(!cancelled)current.current.onError(error.message);});
     return ()=>{cancelled=true;};
   },[props.preview?.assetRoot]);
   useEffect(()=>{
     let cancelled=false;
     if(!props.preview?.clock){glyphs.current.clear();return;}
-    void loadImages(props.preview.clockRoot,props.preview.clock.assets).then(value=>{if(!cancelled)glyphs.current=value;});
+    void loadImages(props.preview.clockRoot,props.preview.clock.assets).then(value=>{if(!cancelled)glyphs.current=value;}).catch(error=>{if(!cancelled)current.current.onError(error.message);});
     return ()=>{cancelled=true;};
   },[props.preview?.clockRoot]);
+  useEffect(()=>{
+    const node=canvas.current;if(!node)return;
+    const wheel=(event:WheelEvent)=>{
+      const {draft,preview,onLayout}=current.current;if(!preview)return;
+      event.preventDefault();
+      const layout=structuredClone(draft.layout);
+      const delta=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?node.clientHeight:1);
+      layout.scale=clamp(layout.scale*Math.exp(-delta*.0015),.2,3);
+      onLayout(layout);
+    };
+    node.addEventListener('wheel',wheel,{passive:false});return()=>node.removeEventListener('wheel',wheel);
+  },[]);
   useEffect(()=>{
     let token=0,last=0,lastPaint=0;
     function draw(now:number){
@@ -84,7 +112,8 @@ export function PreviewCanvas(props:Props) {
       motion.current.x+=(target.x-motion.current.x)*smoothing;
       motion.current.y+=(target.y-motion.current.y)*smoothing;
       for(const layer of preview.layers){
-        const image=layer.video&&video.current&&video.current.readyState>=2?video.current:graphics.current.get(frameFile(layer,elapsed.current,motion.current.x));
+        const video=videos.current.get(layer.id);
+        const image=video&&video.readyState>=2?video:graphics.current.get(frameFile(layer,elapsed.current,motion.current.x))||graphics.current.get(layer.asset);
         if(!image)continue;
         const offset=layer.travel?.length?sample(layer.travel,elapsed.current):[0,0];
         const alpha=layer.fade?.length?sample(layer.fade,elapsed.current)[0]/255:1;
@@ -92,7 +121,9 @@ export function PreviewCanvas(props:Props) {
         ctx.save();ctx.globalAlpha=alpha;
         ctx.translate(left+(layer.x+offset[0])*scale+motion.current.x*width*draft.motion.amount*layer.motion,
           top+(layer.y+offset[1])*scale+motion.current.y*height*draft.motion.amount*layer.motion*draft.motion.vertical);
-        ctx.rotate(layer.rotation*Math.PI/180);ctx.drawImage(image,-layer.w*scale/2,-layer.h*scale/2,layer.w*scale,layer.h*scale);ctx.restore();
+        ctx.rotate(layer.rotation*Math.PI/180);
+        ctx.drawImage(image,-layer.w*scale/2,-layer.h*scale/2,layer.w*scale,layer.h*scale);
+        ctx.restore();
       }
       boxes.current=[];
       if(preview.clock&&draft.layout.clock.enabled){
@@ -113,12 +144,15 @@ export function PreviewCanvas(props:Props) {
         }
       }
       if(mask){ctx.fillStyle='rgba(14,21,31,.44)';ctx.fillRect(0,0,width*device.safeLeft,height);ctx.save();ctx.strokeStyle='rgba(255,255,255,.5)';ctx.setLineDash([6,6]);ctx.beginPath();ctx.moveTo(width*device.safeLeft,0);ctx.lineTo(width*device.safeLeft,height);ctx.stroke();ctx.restore();}
+      if(loadedRoot.current===preview.assetRoot&&paintedRoot.current!==preview.assetRoot){
+        paintedRoot.current=preview.assetRoot;node.dataset.sceneReady='true';node.dataset.readyAt=String(performance.now());node.dataset.layerCount=String(preview.layers.length);current.current.onReady();
+      }
     }
     token=requestAnimationFrame(draw);return ()=>cancelAnimationFrame(token);
   },[]);
   function coords(event:React.PointerEvent<HTMLCanvasElement>){const box=event.currentTarget.getBoundingClientRect();return{x:(event.clientX-box.left)/box.width,y:(event.clientY-box.top)/box.height};}
   return <canvas ref={canvas} width={props.device.width} height={props.device.height} data-testid="wallpaper-canvas"
-    aria-label="壁纸预览，可拖动构图和时间位置" className={`wallpaper-canvas ${ready?'is-ready':''} ${props.tilt?'tilt-mode':''}`}
+    aria-label="壁纸预览，可滚轮缩放、拖动构图和时间位置" className={`wallpaper-canvas ${ready?'is-ready':''} ${props.tilt?'tilt-mode':''}`}
     style={{backgroundImage:props.poster?`url("${props.poster}")`:undefined}}
     onPointerDown={event=>{
       if(props.tilt)return;

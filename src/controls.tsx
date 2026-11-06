@@ -1,3 +1,4 @@
+import { Select } from './Select';
 import { FolderOpen, RotateCcw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { Property } from './types';
@@ -26,7 +27,7 @@ export function PropertyControl({property,value,onChange}:{property:Property;val
     return <Slider label={label} value={Number(value)||0} min={Number(property.min??0)} max={Number(property.max??100)} step={property.step??(fraction?.valueOf()?0.01:1)} digits={property.precision??(fraction?2:0)} onChange={onChange}/>;
   }
   if(type==='color')return <label className="color-field"><span>{label}</span><ColorWell label={label} value={colorHex(value)} onChange={v=>onChange(sourceColor(v))}/></label>;
-  if(type==='combo')return <label className="stack-field"><span>{label}</span><select aria-label={label} value={String(value??'')} onChange={e=>{const found=property.options?.find(o=>String(o.value)===e.target.value);onChange(found?.value??e.target.value);}}>{property.options?.map((o,i)=><option key={i} value={String(o.value)}>{o.label}</option>)}</select></label>;
+  if(type==='combo')return <label className="stack-field"><span>{label}</span><Select aria-label={label} value={String(value??'')} onChange={e=>{const found=property.options?.find(o=>String(o.value)===e.target.value);onChange(found?.value??e.target.value);}}>{property.options?.map((o,i)=><option key={i} value={String(o.value)}>{o.label}</option>)}</Select></label>;
   if(['file','directory','scenetexture','usershortcut'].includes(type))return <label className="stack-field"><span>{label}</span><span className="file-input"><input aria-label={label} value={String(value??'')} placeholder={type==='directory'?'选择目录':'选择文件'} onChange={e=>onChange(e.target.value)}/><button className="icon-button" aria-label={`选择${label}`} onClick={async()=>{const file=await window.yingchuang.chooseFile(type==='directory'?'directory':'asset');if(file)onChange(file);}}><FolderOpen size={15}/></button></span></label>;
   return <label className="stack-field"><span>{label}</span><input aria-label={label} value={typeof value==='object'?JSON.stringify(value):String(value??'')} onChange={e=>onChange(e.target.value)}/></label>;
 }

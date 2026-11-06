@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { existsSync } = require('node:fs');
@@ -9,7 +9,7 @@ const { discover } = require('./discovery.cjs');
 const { Store } = require('./store.cjs');
 const { defaultDraft, makeTemplate, applyTemplate, cleanLayout } = require('./model.cjs');
 const { ConversionQueue } = require('./queue.cjs');
-const { evaluateScene } = require('./scenescript.cjs');
+const { evaluateScene, scriptInput } = require('./scenescript.cjs');
 const devices = require('./devices.json');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'yingchuang', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
@@ -19,9 +19,12 @@ app.setName('映窗');
 let window, store, queue;
 let library = { themes: [], roots: [], engineRoots: [] };
 let previewController = null;
+let pendingMotion;
 const registeredRoots = new Map();
 const rootIds = new Map();
 const processes = new Set();
+const activeTasks = new Set();
+let shuttingDown=false,quitReady=false;
 const inspections = new Map();
 const scriptCache = new Map();
 const apiHandlers = new Map();
@@ -37,7 +40,10 @@ function assetRoot(root) {
   return process.env.YINGCHUANG_PREVIEW_PORT ? `http://127.0.0.1:${process.env.YINGCHUANG_PREVIEW_PORT}/asset/${rootIds.get(absolute)}/` : `yingchuang://asset/${rootIds.get(absolute)}/`;
 }
 function fileUrl(file) { return file ? assetRoot(path.dirname(file)) + encodeURIComponent(path.basename(file)) : ''; }
-function previewData(data) { return { ...data, ...('assetRoot' in data?{assetRoot:assetRoot(data.assetRoot)}:{}), ...('clockRoot' in data?{clockRoot:assetRoot(data.clockRoot)}:{}), ...(data.videoSource?{videoSource:fileUrl(data.videoSource)}:{}) }; }
+function previewData(data) {
+  return {...data,...('assetRoot'in data?{assetRoot:assetRoot(data.assetRoot)}:{}),...('clockRoot'in data?{clockRoot:assetRoot(data.clockRoot)}:{}),
+    ...(data.layers?{layers:data.layers.map(layer=>({...layer,...(layer.videoSource||layer.video?{videoSource:fileUrl(layer.videoSource||path.join(data.assetRoot,layer.video))}:{})}))}:{})};
+}
 function stopWorker(child) {
   if (!child.pid) return;
   if (process.platform==='win32') { spawn('taskkill',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'}).on('error',()=>child.kill()); }
@@ -60,7 +66,15 @@ function state() {
 }
 function notify(channel,data) { if (window && !window.isDestroyed()) window.webContents.send(channel,data);browserPreview?.emit(channel,data); }
 
-async function worker(input, signal, onProgress = () => {}) {
+function worker(...args) {
+  if(shuttingDown)return Promise.reject(new Error('应用正在关闭'));
+  const task=runWorker(...args);activeTasks.add(task);
+  task.then(()=>activeTasks.delete(task),()=>activeTasks.delete(task));
+  return task;
+}
+
+async function runWorker(input, signal, onProgress = () => {}) {
+  const started=performance.now();
   if (signal?.aborted) throw new Error('已取消');
   const core = app.isPackaged ? path.join(process.resourcesPath,'core') : path.join(__dirname,'../core');
   const cacheRoot = path.join(app.getPath('userData'),'cache');
@@ -83,7 +97,9 @@ async function worker(input, signal, onProgress = () => {}) {
     }
     return await new Promise((resolve,reject) => {
       const child = spawn(command,args,{ windowsHide:true, detached:process.platform!=='win32', stdio:['pipe','pipe','pipe'],
-        env:{ ...process.env, PYTHONIOENCODING:'utf-8', PYTHONUTF8:'1', YINGCHUANG_CORE:core, OPENBLAS_NUM_THREADS:'2', IMAGEIO_FFMPEG_NO_PREVENT_SIGINT:'1' } });
+        env:{ ...process.env, PYTHONIOENCODING:'utf-8', PYTHONUTF8:'1', YINGCHUANG_CORE:core,
+          YINGCHUANG_RUNTIME:app.isPackaged?path.join(process.resourcesPath,'runtime'):path.join(__dirname,'../runtime',process.platform==='win32'?'win':'linux'),
+          OPENBLAS_NUM_THREADS:'2', IMAGEIO_FFMPEG_NO_PREVENT_SIGINT:'1' } });
       processes.add(child);
       let buffer='', errors='', result, failure;
       const abort = () => stopWorker(child);
@@ -121,6 +137,7 @@ async function worker(input, signal, onProgress = () => {}) {
   } finally {
     await fs.rm(scratchRoot,{recursive:true,force:true});
     if(exportStagingRoot)await fs.rm(exportStagingRoot,{recursive:true,force:true,maxRetries:3,retryDelay:100});
+    if(process.env.YINGCHUANG_DIAGNOSTICS)console.log('工作进程 '+input.operation+' '+Math.round(performance.now()-started)+' ms');
   }
 }
 
@@ -134,7 +151,9 @@ async function withScripts(theme,draft,signal) {
   const stat=await fs.stat(theme.source);
   const key=JSON.stringify([theme.id,stat.mtimeMs,stat.size,draft.properties,Math.floor(Date.now()/60000)]);
   if(scriptCache.has(key))return{...theme,...scriptCache.get(key)};
-  const input=await worker({operation:'script-input',theme,draft:{...draft,layers:{}}},signal);
+  const detail=await inspect(theme);
+  if(!detail.scriptInput)throw new Error(detail.reason||'无法读取场景脚本');
+  const input=scriptInput(detail.scriptInput,draft.properties);
   if(signal?.aborted)throw new Error('已取消');
   const result=await evaluateScene(input);
   const graphicsScene={...result.scene,objects:result.scene.objects.filter(o=>!input.clockLayerIds.includes(o.id))};
@@ -209,7 +228,8 @@ async function setup() {
   handle('refresh',scan);
   handle('detail',async id => {
     const theme=themeById(id);
-    return { theme:publicTheme(theme), properties:theme.properties, detail:await inspect(theme), draft:await draftFor(theme) };
+    const {scriptInput:input,...detail}=await inspect(theme);
+    return { theme:publicTheme(theme), properties:theme.properties, detail, draft:await draftFor(theme) };
   });
   handle('fonts',() => systemFonts ||= worker({operation:'fonts'}));
   handle('save-draft',(id,draft) => {
@@ -217,15 +237,27 @@ async function setup() {
     store.update(data=> { data.drafts[id]={...structuredClone(draft),layout:cleanLayout(draft.layout)}; });
     return store.data.drafts[id];
   });
-  handle('preview',async(id,draft) => {
-    previewController?.abort(); previewController=new AbortController();
+  handle('preview',async(id,draft,requestId) => {
+    previewController?.abort(); pendingMotion=null;previewController=new AbortController();
     const controller=previewController;
     const theme=await withScripts(themeById(id),draft,controller.signal);
     const data=await worker({operation:'preview',theme,draft,device:deviceById(draft.deviceId)},controller.signal,
       event=>notify('preview-progress',{id,...event}));
+    if(controller.signal.aborted)throw new Error('已取消');
+    if(data.progressive)pendingMotion={id,requestId,theme,draft,controller};
     return previewData(data);
   });
-  handle('cancel-preview',()=>previewController?.abort());
+  handle('preview-motion',(id,requestId)=>{
+    const pending=pendingMotion;
+    if(!pending||pending.id!==id||pending.requestId!==requestId||pending.controller.signal.aborted)return;
+    pendingMotion=null;
+    const {theme,draft,controller}=pending;
+      void worker({operation:'motion-preview',theme,draft,device:deviceById(draft.deviceId)},controller.signal,
+        event=>{if(previewController===controller&&!controller.signal.aborted)notify('preview-progress',{id,requestId,...event});})
+        .then(complete=>{if(previewController===controller&&!controller.signal.aborted)notify('preview-ready',{id,requestId,data:previewData(complete)});})
+        .catch(error=>{if(previewController===controller&&!controller.signal.aborted)notify('preview-ready',{id,requestId,error:error.message});});
+  });
+  handle('cancel-preview',()=>{pendingMotion=null;previewController?.abort();});
   handle('clock',async(id,draft)=>previewData(await worker({operation:'clock',theme:await withScripts(themeById(id),draft),draft,device:deviceById(draft.deviceId)})));
   handle('favorite',id=>store.update(data=>{
     themeById(id); data.favorites=data.favorites.includes(id)?data.favorites.filter(x=>x!==id):[...data.favorites,id];
@@ -283,7 +315,8 @@ async function setup() {
     if (action==='maximize') window.isMaximized()?window.unmaximize():window.maximize();
     if (action==='close') window.close();
   });
-  window = new BrowserWindow({ width:1440,height:960,minWidth:1000,minHeight:680,show:false,frame:false,
+  const area=screen.getPrimaryDisplay().workAreaSize;
+  window = new BrowserWindow({ width:Math.min(1440,area.width),height:Math.min(960,area.height),minWidth:Math.min(800,area.width),minHeight:Math.min(540,area.height),show:false,frame:false,
     backgroundColor:'#edf0f4',title:'映窗',icon:path.join(__dirname,'../build/icon.png'),
     webPreferences:{preload:path.join(__dirname,'preload.cjs'),contextIsolation:true,nodeIntegration:false,sandbox:true} });
   window.setMenuBarVisibility(false);
@@ -304,7 +337,12 @@ if(app.requestSingleInstanceLock())app.whenReady().then(setup).catch(error=>{con
 else app.quit();
 app.on('second-instance',()=>{if(window){if(window.isMinimized())window.restore();window.focus();}});
 app.on('window-all-closed',()=>app.quit());
-app.on('before-quit',()=>{
+app.on('before-quit',event=>{
+  if(quitReady)return;
+  event.preventDefault();
+  if(shuttingDown)return;
+  shuttingDown=true;pendingMotion=null;
   previewController?.abort();queue?.cancel();
   for (const child of processes) stopWorker(child);
+  void Promise.allSettled([...activeTasks]).then(()=>{quitReady=true;app.quit();});
 });

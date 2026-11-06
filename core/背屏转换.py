@@ -247,6 +247,9 @@ def vector(x, default):
         result = [float(v) for v in x.split()]
     elif isinstance(x, (list, tuple)):
         result = [float(v) for v in x]
+    elif isinstance(x, (int, float)):
+        # 作者常把一个滑块绑定到缩放或视差向量，表示各轴使用同一值。
+        result = [float(x)] * len(default)
     else:
         raise ConversionError("图层向量格式不支持。")
     if not all(math.isfinite(v) for v in result):
@@ -375,14 +378,14 @@ def layer_geometry(state, size, height):
             "source_depth": depth, "opacity": state["alpha"], "color": state["color"]}
 
 
-def scene_layers(source, config, data=None, worlds=None):
+def scene_layers(source, config, data=None, worlds=None, stage=None, media_root=None, fast=False):
     from 场景动效 import SceneAssets, atlas_frames
     pkg, project, scene, sw, sh, props = data if data is not None else read_scene(source)
     objects = scene["objects"]
     layers, notes = [], []
     if worlds is None:
         worlds = world_transforms(objects, props, sw, sh, notes)
-    assets = SceneAssets(pkg, None, decode_tex)
+    assets = SceneAssets(pkg, stage, decode_tex, fast=fast)
 
     for obj in objects:
         name = obj.get("name", str(obj.get("id", "图层")))
@@ -390,9 +393,20 @@ def scene_layers(source, config, data=None, worlds=None):
         if state is None or state["alpha"] <= 0:
             continue
         image_path = obj.get("image")
-        if not isinstance(image_path, str) or not image_path or image_path.startswith("models/util/"):
+        if not isinstance(image_path, str) or not image_path:
             continue
         try:
+            if image_path == "models/util/solidlayer.json":
+                size = vector(obj.get("size"), [256,256])
+                # 音频条的底图只是着色器输入，直接显示会遮住整幅画面。
+                if any("audio_bars" in effect.get("file", "").lower() for effect in obj.get("effects", [])):
+                    continue
+                geometry = layer_geometry(state, size, sh)
+                layers.append({"id":obj["id"], "name":name, **geometry,
+                               "image":Image.new("RGBA",(8,8),"white"), "native_size":size[:2]})
+                continue
+            if image_path.startswith("models/util/"):
+                continue
             model = assets.json(image_path)
             material = assets.json(model["material"])
             passes = material["passes"]
@@ -400,11 +414,25 @@ def scene_layers(source, config, data=None, worlds=None):
             if len(passes) != 1 or p.get("shader", "").lower() not in {"genericimage", "genericimage2", "genericimage4"}:
                 raise ConversionError("不是支持的单通道平面材质")
             texture = p["textures"][0]
+            if assets.is_video(texture):
+                if stage is None:
+                    raise ConversionError("视频图层需要输出资源目录")
+                from 视频处理 import extract_texture_video, poster
+                media = Path(media_root) if media_root else stage/"media"
+                media.mkdir(parents=True,exist_ok=True)
+                video = extract_texture_video(assets.texture_bytes(texture),media,texture)
+                poster_file = media/(video.stem+".jpg")
+                if not poster_file.is_file():poster(video,poster_file)
+                with Image.open(poster_file) as source_image:image=source_image.convert("RGBA")
+                size = vector(obj.get("size"),list(image.size))
+                layers.append({"id":obj["id"],"name":name,**layer_geometry(state,size,sh),
+                               "image":image,"native_size":size[:2],"videoSource":str(video)})
+                continue
             is_atlas = assets.is_atlas(texture)
-            image = atlas_frames(assets, texture, trim=False)[0] if is_atlas else assets.texture(texture, albedo=True)
+            image = atlas_frames(assets, texture, trim=False, first_only=True)[0] if is_atlas else assets.texture(texture, albedo=True)
             size = vector(obj.get("size"), list(image.size))
             geometry = layer_geometry(state, size, sh)
-            image.thumbnail((int(config["纹理最长边"]),) * 2, Image.Resampling.LANCZOS)
+            image.thumbnail((int(config["纹理最长边"]),) * 2, Image.Resampling.BILINEAR if fast else Image.Resampling.LANCZOS)
             layers.append({"id": obj["id"], "name": name, **geometry, "image": image,
                            "native_size": size[:2], "atlas": texture if is_atlas else None,
                            "puppet": model.get("puppet"), "blend": p.get("blending", "normal")})

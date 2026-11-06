@@ -15,7 +15,7 @@ def linux_runtime():
     destination=ROOT/'runtime/linux'
     args=[sys.executable,'-I','-m','PyInstaller','--noconfirm','--clean','--onedir','--name','converter-worker',
           '--distpath',str(work/'dist'),'--workpath',str(work/'work'),'--specpath',str(work),
-          '--paths',str(ROOT/'core'),'--collect-all','fontTools','--collect-all','imageio_ffmpeg',
+          '--paths',str(ROOT/'core'),'--collect-submodules','fontTools.ttLib.tables','--collect-all','imageio_ffmpeg',
           '--exclude-module','tkinter','--exclude-module','pytest','--exclude-module','IPython',
           '--add-data',str(ROOT/'core/预览模板.html')+':.',str(ROOT/'core/应用桥接.py')]
     with (ROOT/'build/转换运行时.log').open('w') as log:subprocess.check_call(args,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
@@ -25,6 +25,8 @@ def linux_runtime():
     for name in ('libstdc++.so.6','libgcc_s.so.1'):
         library=destination/'_internal'/name
         if library.exists():library.unlink()
+    from 编译网格 import build
+    build('linux')
     print('Linux 转换运行时已生成：'+str(destination),flush=True)
 
 
@@ -32,7 +34,9 @@ def windows_runtime():
     cache=ROOT/'build/windows-downloads';cache.mkdir(parents=True,exist_ok=True)
     archive=cache/'python-3.12.10-embed-amd64.zip'
     if not archive.exists():urllib.request.urlretrieve('https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip',archive)
-    destination=ROOT/'runtime/win';destination.mkdir(parents=True,exist_ok=True)
+    destination=ROOT/'runtime/win'
+    if destination.exists():shutil.rmtree(destination)
+    destination.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(archive) as package:package.extractall(destination)
     wheels=cache/'wheels';wheels.mkdir(exist_ok=True)
     subprocess.check_call([sys.executable,'-I','-m','pip','download','--disable-pip-version-check','--only-binary=:all:',
@@ -49,7 +53,12 @@ def windows_runtime():
                     target=site/Path(*parts[2:])
                 else:target=site/name
                 target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(package.read(name))
+    # 随包保留运行代码和许可证，省去依赖自带的测试与编译缓存。
+    for directory in sorted(site.rglob('*'),key=lambda p:len(p.parts),reverse=True):
+        if directory.is_dir() and directory.name in {'tests','__pycache__'}:shutil.rmtree(directory)
     (destination/'python312._pth').write_text('python312.zip\n.\nLib/site-packages\nimport site\n',encoding='utf-8')
+    from 编译网格 import build
+    build('win')
     print('Windows 转换运行时已生成：'+str(destination),flush=True)
 
 

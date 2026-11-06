@@ -1,8 +1,44 @@
 """将视频壁纸转成适合背屏播放的本地视频资源。"""
 from pathlib import Path
+from hashlib import sha256
+import os
 import subprocess
 import tempfile
 import imageio_ffmpeg
+
+
+def extract_texture_video(data, directory, name):
+    """按 TEX 容器索引读取视频，不在二进制中猜测文件头位置。"""
+    from 背屏转换 import Reader,MAX_FILE
+    r=Reader(data)
+    if r.cstr()!="TEXV0005" or r.cstr()!="TEXI0001":raise ValueError("未知视频纹理版本")
+    header=[r.i32() for _ in range(7)]
+    kind=r.cstr()
+    if not header[1]&32 or kind not in {"TEXB0003","TEXB0004"}:raise ValueError("不是支持的视频纹理")
+    if r.u32()!=1:raise ValueError("视频纹理图像数量无效")
+    r.i32()
+    extended=kind=="TEXB0004" and r.u32()==1
+    if r.u32()!=1:raise ValueError("视频纹理层级数量无效")
+    if extended:
+        if (r.u32(),r.u32())!=(1,2):raise ValueError("未知视频纹理参数")
+        # TEXB0004 的条件说明以零字节结尾。
+        r.take(data.index(b"\0",r.pos)-r.pos+1)
+        if r.u32()!=1:raise ValueError("视频纹理条件数量无效")
+    width,height,compressed,expected=(r.u32() for _ in range(4))
+    payload=r.take(r.u32())
+    if compressed:
+        if compressed!=1 or expected>MAX_FILE:raise ValueError("视频纹理压缩信息无效")
+        import lz4.block
+        payload=lz4.block.decompress(payload,uncompressed_size=expected)
+    if len(payload)<12 or payload[4:8]!=b"ftyp":raise ValueError("视频纹理内容不是 MP4")
+    key=sha256(name.encode()+data[:91]+payload[:256]+str(len(payload)).encode()).hexdigest()[:24]
+    destination=Path(directory)/(key+".mp4")
+    if not destination.is_file():
+        # 原始视频按源文件版本归属到媒体缓存；取消不会留下半个成品。
+        with tempfile.NamedTemporaryFile(dir=directory,delete=False) as stream:
+            staging=Path(stream.name);stream.write(payload)
+        os.replace(staging,destination)
+    return destination
 
 
 def metadata(source):

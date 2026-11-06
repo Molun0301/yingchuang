@@ -1,6 +1,15 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {evaluateScene}=require('../desktop/scenescript.cjs');
+const {evaluateScene,scriptInput}=require('../desktop/scenescript.cjs');
+
+test('复用主题解析时保留零值、空值和布尔绑定，不改变源定义',()=>{
+  const input={properties:{amount:{value:1},enabled:{value:true},optional:{value:'默认'},mode:{value:'0'}},scene:{objects:[{
+    id:1,alpha:{user:'amount',value:1},visible:{user:'enabled',value:true},text:{user:'optional',value:'默认'},
+    conditional:{user:{name:'mode',condition:'1'},value:false}}]}};
+  const result=scriptInput(input,{amount:0,enabled:false,optional:null,mode:'1'});
+  assert.deepEqual(result.scene.objects[0],{id:1,alpha:0,visible:false,text:null,conditional:true});
+  assert.equal(input.properties.amount.value,1);
+});
 
 test('原主题脚本读取滑块和开关，并输出实际坐标与颜色',async()=>{
   const input={width:100,height:100,properties:{offset:{type:'slider',value:17},enabled:{type:'bool',value:false},tint:{type:'color',value:'0.1 0.2 0.3'}},scene:{objects:[

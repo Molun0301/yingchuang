@@ -1,6 +1,6 @@
 {
   "name": "yingchuang",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "映窗 · 背屏壁纸工作室",
   "author": "映窗",
   "private": true,
@@ -15,10 +15,8 @@
     "package:win": "npm run build && electron-builder --win zip --publish never"
   },
   "dependencies": {
-    "lucide-react": "^0.577.0",
-    "quickjs-emscripten": "0.32.0",
-    "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "quickjs-emscripten-core": "0.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.0",
@@ -28,7 +26,10 @@
     "electron": "45.2.3",
     "electron-builder": "26.18.0",
     "typescript": "^5.9.3",
-    "vite": "8.3.6"
+    "vite": "8.3.6",
+    "lucide-react": "^0.577.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   },
   "build": {
     "appId": "cn.yingchuang.desktop",
@@ -40,7 +41,8 @@
     "files": [
       "dist/**/*",
       "desktop/**/*",
-      "package.json"
+      "package.json",
+      "!**/*.map"
     ],
     "extraResources": [
       {
@@ -84,7 +86,12 @@
     "asarUnpack": [
       "**/*.wasm"
     ],
-    "npmRebuild": false
+    "npmRebuild": false,
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "compression": "maximum"
   },
   "desktopName": "yingchuang.desktop"
 }
