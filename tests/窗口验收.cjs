@@ -12,7 +12,7 @@ const {Store}=require('../desktop/store.cjs');
   store.data.settings.roots=[path.join(root,'test-results/窗口样例')];store.save();
   const packaged=process.env.YINGCHUANG_PACKAGED_APP;
   const app=await electron.launch({...(packaged?{executablePath:path.resolve(packaged)}:{}),args:[...(packaged?[]:[root]),'--force-device-scale-factor=1.5'],env:{...process.env,YINGCHUANG_DATA_DIR:data,
-    YINGCHUANG_PYTHON:process.platform==='win32'?path.join(root,'runtime/win/python.exe'):path.join(root,'.venv/bin/python'),YINGCHUANG_DISABLE_GPU:'1'}});
+    YINGCHUANG_PYTHON:process.platform==='win32'?path.join(root,'runtime/win/python.exe'):path.join(root,'.venv/bin/python'),YINGCHUANG_DISABLE_GPU:process.platform==='win32'?'0':'1'}});
   const errors=[],measurements=[];
   try{
     const page=await app.firstWindow();page.on('pageerror',error=>errors.push(error.message));
@@ -41,7 +41,8 @@ const {Store}=require('../desktop/store.cjs');
       measurements.push({width,height,menu:box,footer});
     }
     assert.deepEqual(errors,[]);
-    fs.writeFileSync(path.join(output,'结果.json'),JSON.stringify({platform:process.platform,scale:1.5,measurements,errors},null,2));
+    const graphics=await app.evaluate(({app})=>app.getGPUFeatureStatus());
+    fs.writeFileSync(path.join(output,'结果.json'),JSON.stringify({platform:process.platform,scale:1.5,graphics,measurements,errors},null,2));
     console.log('窗口、菜单、时间和滚轮检查通过');
   }finally{await app.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
