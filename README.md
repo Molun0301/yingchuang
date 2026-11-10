@@ -113,7 +113,7 @@ AppImage 需要 FUSE 2。Ubuntu 24.04 及以上运行 `sudo apt install libfuse2
 
 ## 项目统计
 
-[![Star History Chart](https://star-history.dera.page/svg?repos=Molun0301/yingchuang&type=Date)](https://star-history.dera.page/#Molun0301/yingchuang&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Molun0301/yingchuang&type=Date)](https://www.star-history.com/#Molun0301/yingchuang&Date)
 
 ## 从源码构建
 
