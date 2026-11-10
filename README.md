@@ -115,6 +115,10 @@ AppImage 需要 FUSE 2。Ubuntu 24.04 及以上运行 `sudo apt install libfuse2
 
 [![Star History Chart](https://api.star-history.com/svg?repos=Molun0301/yingchuang&type=Date)](https://www.star-history.com/#Molun0301/yingchuang&Date)
 
+## 友情链接
+
+- [LINUX DO](https://linux.do)：新的理想型社区
+
 ## 从源码构建
 
 环境要求、构建与测试步骤见 [项目说明](docs/公开文档/项目说明.md)。
