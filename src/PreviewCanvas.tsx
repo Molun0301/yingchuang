@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Device, Draft, Layout, Preview, RowKey, SceneLayer } from './types';
+import timevariants from '../desktop/timevariants.cjs';
+const weightAt: (points: number[][], minute: number) => number = timevariants.weightAt;
 
+/** live 存在时为完整画面模式：画布透明，只绘制时钟与辅助线，并把取景位置同步给下方的实时渲染层 */
 type Props = { preview: Preview|null; draft: Draft; device: Device; poster: string; playing: boolean; tilt: boolean; mask: boolean;
-  selected: RowKey|null; onSelect:(key:RowKey|null)=>void; onLayout:(layout:Layout)=>void; onReady:()=>void;onError:(message:string)=>void };
+  selected: RowKey|null; onSelect:(key:RowKey|null)=>void; onLayout:(layout:Layout)=>void; onReady:()=>void;onError:(message:string)=>void;
+  live?: { ready: boolean };
+  /** 预览一天中的这一分钟；未指定时跟随当前时间 */
+  minute?: number|null };
 type Box = { key:RowKey; x:number; y:number; w:number; h:number };
 const clamp=(value:number,min=0,max=1)=>Math.max(min,Math.min(max,value));
 const roleName={week:'星期',date:'日期',time:'时间'};
@@ -96,12 +102,13 @@ export function PreviewCanvas(props:Props) {
       const {preview,draft,device,playing,tilt,mask,selected}=current.current;
       const node=canvas.current,ctx=node?.getContext('2d');
       if(!preview||!node||!ctx)return;
+      const live=current.current.live;
       const delta=last?Math.min(now-last,100):0;last=now;
       if(playing)elapsed.current+=delta;
       if(now-lastPaint<1000/Math.max(15,draft.motion.fps))return;const paintDelta=Math.min(100,now-lastPaint);lastPaint=now;
       if(node.width!==device.width)node.width=device.width;if(node.height!==device.height)node.height=device.height;
       const width=node.width,height=node.height;
-      ctx.clearRect(0,0,width,height);ctx.fillStyle='#111b2b';ctx.fillRect(0,0,width,height);
+      ctx.clearRect(0,0,width,height);if(!live){ctx.fillStyle=preview.background??'#111b2b';ctx.fillRect(0,0,width,height);}
       const maximum=Math.max(1,...preview.layers.map(l=>l.motion));
       const ax=draft.motion.amount*maximum,ay=ax*draft.motion.vertical;
       const scale=Math.max(width*(1+2*ax)/preview.width,height*(1+2*ay)/preview.height)*draft.layout.scale;
@@ -111,12 +118,22 @@ export function PreviewCanvas(props:Props) {
       const smoothing=1-Math.pow(1-draft.motion.smoothing,paintDelta/(1000/draft.motion.fps));
       motion.current.x+=(target.x-motion.current.x)*smoothing;
       motion.current.y+=(target.y-motion.current.y)*smoothing;
-      for(const layer of preview.layers){
+      if(live){
+        // 实时渲染层按同一取景公式定位；感应模式整幅位移，与导出的整幅视频一致。
+        const frame=node.parentElement?.querySelector<HTMLElement>('[data-live-frame]');
+        if(frame){
+          const k=node.clientWidth/width,ox=motion.current.x*width*draft.motion.amount,oy=motion.current.y*height*draft.motion.amount*draft.motion.vertical;
+          const box=`${(preview.width*scale*k).toFixed(1)}px ${(preview.height*scale*k).toFixed(1)}px translate(${((left+ox)*k).toFixed(1)}px,${((top+oy)*k).toFixed(1)}px)`;
+          if(frame.dataset.box!==box){frame.dataset.box=box;frame.style.width=(preview.width*scale*k).toFixed(1)+'px';frame.style.height=(preview.height*scale*k).toFixed(1)+'px';frame.style.transform=`translate(${((left+ox)*k).toFixed(1)}px,${((top+oy)*k).toFixed(1)}px)`;}
+        }
+      }
+      const clock=new Date(),minute=current.current.minute??clock.getHours()*60+clock.getMinutes()+clock.getSeconds()/60;
+      for(const layer of live?[]:preview.layers){
         const video=videos.current.get(layer.id);
         const image=video&&video.readyState>=2?video:graphics.current.get(frameFile(layer,elapsed.current,motion.current.x))||graphics.current.get(layer.asset);
         if(!image)continue;
         const offset=layer.travel?.length?sample(layer.travel,elapsed.current):[0,0];
-        const alpha=layer.fade?.length?sample(layer.fade,elapsed.current)[0]/255:1;
+        const alpha=(layer.fade?.length?sample(layer.fade,elapsed.current)[0]/255:1)*(layer.time?weightAt(layer.time,minute):1);
         if(alpha<=0)continue;
         ctx.save();ctx.globalAlpha=alpha;
         ctx.translate(left+(layer.x+offset[0])*scale+motion.current.x*width*draft.motion.amount*layer.motion,
@@ -144,16 +161,19 @@ export function PreviewCanvas(props:Props) {
         }
       }
       if(mask){ctx.fillStyle='rgba(14,21,31,.44)';ctx.fillRect(0,0,width*device.safeLeft,height);ctx.save();ctx.strokeStyle='rgba(255,255,255,.5)';ctx.setLineDash([6,6]);ctx.beginPath();ctx.moveTo(width*device.safeLeft,0);ctx.lineTo(width*device.safeLeft,height);ctx.stroke();ctx.restore();}
-      if(loadedRoot.current===preview.assetRoot&&paintedRoot.current!==preview.assetRoot){
-        paintedRoot.current=preview.assetRoot;node.dataset.sceneReady='true';node.dataset.readyAt=String(performance.now());node.dataset.layerCount=String(preview.layers.length);current.current.onReady();
+      const readyKey=live?(live.ready?'live:'+preview.assetRoot:''):(loadedRoot.current===preview.assetRoot?preview.assetRoot:'');
+      if(readyKey&&paintedRoot.current!==readyKey){
+        paintedRoot.current=readyKey;node.dataset.sceneReady='true';node.dataset.readyAt=String(performance.now());node.dataset.layerCount=String(preview.layers.length);
+        if(!live)current.current.onReady();
       }
+      if(live&&!live.ready&&paintedRoot.current){paintedRoot.current='';node.dataset.sceneReady='false';}
     }
     token=requestAnimationFrame(draw);return ()=>cancelAnimationFrame(token);
   },[]);
   function coords(event:React.PointerEvent<HTMLCanvasElement>){const box=event.currentTarget.getBoundingClientRect();return{x:(event.clientX-box.left)/box.width,y:(event.clientY-box.top)/box.height};}
   return <canvas ref={canvas} width={props.device.width} height={props.device.height} data-testid="wallpaper-canvas"
-    aria-label="壁纸预览，可滚轮缩放、拖动构图和时间位置" className={`wallpaper-canvas ${ready?'is-ready':''} ${props.tilt?'tilt-mode':''}`}
-    style={{backgroundImage:props.poster?`url("${props.poster}")`:undefined}}
+    aria-label="壁纸预览，可滚轮缩放、拖动构图和时间位置" className={`wallpaper-canvas ${ready?'is-ready':''} ${props.tilt?'tilt-mode':''} ${props.live?'live':''}`}
+    style={{backgroundImage:props.poster&&!props.live?`url("${props.poster}")`:undefined}}
     onPointerDown={event=>{
       if(props.tilt)return;
       const point=coords(event),x=point.x*props.device.width,y=point.y*props.device.height;

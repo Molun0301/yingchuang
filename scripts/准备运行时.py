@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.request
 import zipfile
 
@@ -12,12 +13,31 @@ for stream in (sys.stdout,sys.stderr):stream.reconfigure(encoding='utf-8')
 ROOT=Path(__file__).resolve().parents[1]
 
 
+def ffmpeg_runtime(platform, destination):
+    cache=ROOT/'build/ffmpeg-downloads';cache.mkdir(parents=True,exist_ok=True)
+    name='ffmpeg-n8.1-latest-'+('linux64-gpl-8.1.tar.xz' if platform=='linux' else 'win64-gpl-8.1.zip')
+    archive=cache/name
+    if not archive.exists():urllib.request.urlretrieve('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/'+name,archive)
+    if platform=='linux':
+        with tarfile.open(archive) as package:
+            member=next(item for item in package.getmembers() if item.name.endswith('/bin/ffmpeg'))
+            with package.extractfile(member) as source,(destination/'ffmpeg').open('wb') as output:shutil.copyfileobj(source,output)
+        (destination/'ffmpeg').chmod(0o755)
+    else:
+        with zipfile.ZipFile(archive) as package:
+            member=next(name for name in package.namelist() if name.endswith('/bin/ffmpeg.exe'))
+            (destination/'ffmpeg.exe').write_bytes(package.read(member))
+
+
 def linux_runtime():
     work=ROOT/'build/pyinstaller';work.mkdir(parents=True,exist_ok=True)
+    # 覆盖默认钩子，保留 Python 模块，同时省去依赖自带的旧 FFmpeg。
+    hooks=work/'hooks';hooks.mkdir(exist_ok=True)
+    (hooks/'hook-imageio_ffmpeg.py').write_text('hiddenimports = ["imageio_ffmpeg.binaries"]\n',encoding='utf-8')
     destination=ROOT/'runtime/linux'
     args=[sys.executable,'-I','-m','PyInstaller','--noconfirm','--clean','--onedir','--name','converter-worker',
           '--distpath',str(work/'dist'),'--workpath',str(work/'work'),'--specpath',str(work),
-          '--paths',str(ROOT/'core'),'--collect-submodules','fontTools.ttLib.tables','--collect-all','imageio_ffmpeg',
+          '--paths',str(ROOT/'core'),'--collect-submodules','fontTools.ttLib.tables','--additional-hooks-dir',str(hooks),
           '--exclude-module','tkinter','--exclude-module','pytest','--exclude-module','IPython',
           '--add-data',str(ROOT/'core/预览模板.html')+':.',str(ROOT/'core/应用桥接.py')]
     with (ROOT/'build/转换运行时.log').open('w') as log:subprocess.check_call(args,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
@@ -27,6 +47,7 @@ def linux_runtime():
     for name in ('libstdc++.so.6','libgcc_s.so.1'):
         library=destination/'_internal'/name
         if library.exists():library.unlink()
+    ffmpeg_runtime('linux',destination)
     from 编译网格 import build
     build('linux')
     print('Linux 转换运行时已生成：'+str(destination),flush=True)
@@ -50,6 +71,7 @@ def windows_runtime():
             for name in package.namelist():
                 if name.endswith('/'):continue
                 parts=Path(name).parts
+                if parts[:2]==('imageio_ffmpeg','binaries') and parts[-1].startswith('ffmpeg-'):continue
                 if parts[0].endswith('.data'):
                     if len(parts)<3 or parts[1] not in {'purelib','platlib'}:continue
                     target=site/Path(*parts[2:])
@@ -59,6 +81,7 @@ def windows_runtime():
     for directory in sorted(site.rglob('*'),key=lambda p:len(p.parts),reverse=True):
         if directory.is_dir() and directory.name in {'tests','__pycache__'}:shutil.rmtree(directory)
     (destination/'python312._pth').write_text('python312.zip\n.\nLib/site-packages\nimport site\n',encoding='utf-8')
+    ffmpeg_runtime('win',destination)
     from 编译网格 import build
     build('win')
     print('Windows 转换运行时已生成：'+str(destination),flush=True)

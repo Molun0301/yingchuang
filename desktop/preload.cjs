@@ -6,9 +6,9 @@ const listen = (name,callback) => {
 };
 contextBridge.exposeInMainWorld('yingchuang',{
   bootstrap:()=>invoke('bootstrap'),refresh:()=>invoke('refresh'),detail:id=>invoke('detail',id),fonts:()=>invoke('fonts'),
-  saveDraft:(id,draft)=>invoke('save-draft',id,draft),preview:(id,draft,requestId)=>invoke('preview',id,draft,requestId),
+  saveDraft:(id,draft)=>invoke('save-draft',id,draft),livePatch:(id,draft)=>invoke('live-patch',id,draft),preview:(id,draft,requestId)=>invoke('preview',id,draft,requestId),
   clock:(id,draft)=>invoke('clock',id,draft),cancelPreview:()=>invoke('cancel-preview'),
-  previewMotion:(id,requestId)=>invoke('preview-motion',id,requestId),
+  previewMotion:(id,requestId)=>invoke('preview-motion',id,requestId),prefetch:id=>invoke('prefetch',id),
   favorite:id=>invoke('favorite',id),saveTemplate:(name,layout)=>invoke('save-template',name,layout),
   deleteTemplate:id=>invoke('delete-template',id),applyTemplate:(ids,id)=>invoke('apply-template',ids,id),
   settings:settings=>invoke('settings',settings),chooseDirectory:purpose=>invoke('choose-directory',purpose),

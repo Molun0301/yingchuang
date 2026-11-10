@@ -1,12 +1,17 @@
 """按材质、骨骼和发射器的类型转换场景动效。"""
 
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from itertools import chain
+import gzip
 import json
 import math
+import os
 from pathlib import Path, PurePosixPath
 import random
+import shutil
 import struct
+import tempfile
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -18,6 +23,8 @@ ASSET_ERRORS = (ValueError, KeyError, IndexError, TypeError, OSError, struct.err
 WARP_EFFECTS = {"waterripple", "waterwaves", "foliagesway", "shake", "iris", "waterflow", "cloudmotion", "pulse"}
 ANIMATION_PIXEL_LIMIT = 48_000_000
 PARTICLE_LIMIT = 72
+# 视频转码等外部进程在后台线程并行运行。
+BACKGROUND = ThreadPoolExecutor(max_workers=4)
 
 
 def as_albedo(image, texture_format):
@@ -41,10 +48,23 @@ class SceneAssets:
         self.textures = {}
         self.saved = {}
         self.animated_pixels = 0
+        self.jobs = []
         libraries = [p for p in package.path.parents if p.name.lower() == "steamapps"]
         libraries.append(Path.home() / ".local/share/Steam/steamapps")
         self.engine_roots = [p / "common/wallpaper_engine/assets" for p in libraries]
         self.engine_roots = list(getattr(package, "engine_roots", [])) + self.engine_roots
+
+    def later(self, function, *args):
+        """耗时的外部转码放到后台并行，finish 等待全部完成。"""
+        self.jobs.append(BACKGROUND.submit(function, *args))
+
+    def finish(self):
+        # 先等所有任务结束再报告错误，失败时不留下仍在写入临时目录的进程。
+        errors = [job.exception() for job in self.jobs]
+        self.jobs.clear()
+        for error in errors:
+            if error:
+                raise error
 
     def builtin(self, path):
         parts = PurePosixPath(path.replace("\\", "/"))
@@ -262,8 +282,7 @@ def prewarm_track(keys, elapsed):
     return [(time, *values) for time,values in sorted(shifted.items())]
 
 
-def sprite_tracks(assets, obj, state, sw, sh, name, limit, properties):
-    descriptor = assets.json(obj["particle"])
+def sprite_settings(descriptor):
     emitters = descriptor.get("emitter") or []
     if not emitters or not isinstance(emitters[0], dict):
         raise ValueError("粒子发射器缺少数据")
@@ -273,6 +292,12 @@ def sprite_tracks(assets, obj, state, sw, sh, name, limit, properties):
     emitter = emitters[0]
     if emitter.get("name") not in {"boxrandom","sphererandom","conerandom","instantaneous","immediaterandom"}:
         raise ValueError(f"粒子发射器 {emitter.get('name')} 暂未支持")
+    return emitter,renderer
+
+
+def sprite_tracks(assets, obj, state, sw, sh, name, limit, properties):
+    descriptor = assets.json(obj["particle"])
+    emitter,renderer = sprite_settings(descriptor)
     material = assets.json(descriptor["material"])["passes"][0]
     texture = material["textures"][0]
     initial = {setting.get("name"): setting for setting in descriptor.get("initializer", [])}
@@ -424,6 +449,22 @@ def source_text(assets, obj, geometry):
     return image
 
 
+def cached_video(source, output, fps):
+    """同一段内嵌视频按帧率只转码一次，结果放在原视频旁边（媒体缓存）；修改壁纸设置后重新生成预览时直接复用。"""
+    from 视频处理 import encode
+    cached = Path(source).with_name(f"{Path(source).stem}-{int(fps)}fps.mp4")
+    if not cached.is_file():
+        # 预览与导出可能同时转码同一段视频，各自写临时文件后原子替换。
+        with tempfile.NamedTemporaryFile(dir=cached.parent, suffix=".mp4", delete=False) as stream:
+            staging = Path(stream.name)
+        try:
+            encode(source, staging, fps)
+            os.replace(staging, cached)
+        finally:
+            staging.unlink(missing_ok=True)
+    shutil.copyfile(cached, output)
+
+
 def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=None):
     base = layer["image"]
     warp = [(name,spec) for name,spec in specs if name in WARP_EFFECTS]
@@ -442,9 +483,8 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
             base = grade_pixels(base,scalar(spec,"brightness",0,-1,1),scalar(spec,"contrast",0,-1,1))
     if layer.get("videoSource"):
         if not assets.fast:
-            from 视频处理 import encode
             layer["video"]="assets/"+key+".mp4"
-            encode(layer.pop("videoSource"),assets.stage/layer["video"],assets.fps)
+            assets.later(cached_video,layer.pop("videoSource"),assets.stage/layer["video"],assets.fps)
         layer["asset"]=assets.write(key,finish_frame(base,layer,grade))
         return ["场景内嵌视频"]
     frames = None
@@ -513,12 +553,61 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
     return used
 
 
-def build_motion_scene(package, scene, properties, layers, worlds, stage, decode_texture, geometry, notes, fast=False, fps=30):
+def baked_is_static(record):
+    frame_bytes = record["width"]*record["height"]*4
+    pixel_limit = max(16,record["width"]*record["height"]*.0005)
+    with gzip.open(Path(record["dir"])/"frames.rgba.gz","rb") as source:
+        first = np.frombuffer(source.read(frame_bytes),dtype=np.uint8).astype(np.int16)
+        for _ in range(1,record["count"]):
+            current = np.frombuffer(source.read(frame_bytes),dtype=np.uint8).astype(np.int16)
+            # 按变化像素判断，避免小范围动画被整幅均值稀释。
+            difference = np.abs(current-first).reshape(-1,4)
+            if np.count_nonzero((difference>8).any(axis=1))>pixel_limit:return False
+    return True
+
+
+def render_baked(assets, record, layer, grade, key, static, pixel_budget=None):
+    width,height,count = record["width"],record["height"],record["count"]
+    size = width,height
+    indices = [0]
+    if not static:
+        step = max(1,math.ceil(width*height*count/pixel_budget))
+        indices = range(0,count,step)
+        minimum = min(12,count)
+        if len(indices)<minimum:
+            # 达到帧数下限后用整数索引均匀取样，仍覆盖原来的完整周期。
+            indices = [i*count//minimum for i in range(minimum)]
+        if width*height*len(indices)>pixel_budget:
+            scale = min(1,max(32/min(width,height),math.sqrt(pixel_budget/(width*height*len(indices)))))
+            size = max(min(32,width),int(width*scale)),max(min(32,height),int(height*scale))
+    def frames():
+        frame_bytes = width*height*4
+        with gzip.open(Path(record["dir"])/"frames.rgba.gz","rb") as source:
+            for index in indices:
+                source.seek(index*frame_bytes)
+                frame = Image.frombytes("RGBA",(width,height),source.read(frame_bytes))
+                if frame.size!=size:frame=frame.resize(size,Image.Resampling.LANCZOS)
+                yield finish_frame(frame,layer,grade)
+    if static:
+        layer["image"]=next(frames())
+        layer["asset"]=assets.write(key,layer["image"])
+    else:
+        layer["sequence"]=assets.sequence(key,frames(),count/record["fps"]*1000)
+        layer["asset"]=layer["sequence"]["frames"][0]
+        with Image.open(assets.stage/layer["asset"]) as image:layer["image"]=image.convert("RGBA")
+
+
+def build_motion_scene(package, scene, properties, layers, worlds, stage, decode_texture, geometry, notes, fast=False, fps=30, baked=None):
     assets = SceneAssets(package, stage, decode_texture, fast=fast)
     assets.fps = fps
     sw,sh = (float(scene["general"]["orthogonalprojection"][axis]) for axis in ("width","height"))
     layers_by_id={layer["id"]:layer for layer in layers}
     objects=scene["objects"]
+    baked=baked or {}
+    # 渲染器里不可见的图层（例如未播放音乐时的媒体组件）记为空，转换时同样不输出。
+    baked_static={obj["id"]:fast or baked_is_static(baked[str(obj["id"])]) for obj in objects if not baked.get(str(obj["id"]),{}).get("empty")
+                  if str(obj["id"]) in baked and (worlds.get(obj["id"]) or {}).get("alpha",0)>0}
+    pending_baked=sum(not static for static in baked_static.values())
     grade=(0,0)
     for obj in objects:
         if obj.get("image")!="models/util/fullscreenlayer.json" or worlds.get(obj["id"]) is None:
@@ -528,14 +617,17 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                 grade=scalar(spec,"brightness",0,-1,1),scalar(spec,"contrast",0,-1,1)
     result, restored, particle_count=[],[],0
     ignored_mouse=[]
-    pending_emitters = sum(bool(obj.get("particle")) and (worlds.get(obj["id"]) or {}).get("alpha",0)>0 for obj in objects)
+    pending_emitters = sum(bool(obj.get("particle")) and str(obj["id"]) not in baked and (worlds.get(obj["id"]) or {}).get("alpha",0)>0 for obj in objects)
     object_specs = {obj["id"]: effects_for(obj, properties) for obj in objects if worlds.get(obj["id"])}
     for identifier,specs in object_specs.items():
         if any(kind=='cursorripple' for kind,_ in specs):ignored_mouse.append(str(identifier)+':cursorripple')
         object_specs[identifier]=[(kind,spec) for kind,spec in specs if kind!='cursorripple']
     pending_surfaces = sum(
-        any(kind in WARP_EFFECTS for kind,_ in object_specs.get(layer["id"], [])) for layer in layers
+        str(layer["id"]) not in baked and any(kind in WARP_EFFECTS for kind,_ in object_specs.get(layer["id"], [])) for layer in layers
     )
+    # 骨骼与帧图集动画没有单独预算，排在后面时会被前面的图层用尽；分配份额时把它们也算作待处理层。
+    pending_frames = sum(str(layer["id"]) not in baked and bool(layer.get("puppet") or layer.get("atlas"))
+                         and not any(kind in WARP_EFFECTS for kind,_ in object_specs.get(layer["id"], [])) for layer in layers)
     if grade!=(0,0):
         restored.append("全局亮度和对比度")
     for index,obj in enumerate(objects):
@@ -544,15 +636,34 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             continue
         name=str(obj.get("name",obj["id"]))
         key=f"object_{index:03d}"
+        if "_time_index" in obj:key+=f"_t{obj['_time_index']}"
         specs=object_specs[obj["id"]]
         base=layers_by_id.get(obj["id"])
-        if base is not None:
+        first_layer=len(result)
+        if baked.get(str(obj["id"]),{}).get("empty"):
+            continue
+        if str(obj["id"]) in baked:
+            record=baked[str(obj["id"])]
+            bx,by,bw,bh=record["bbox"]
+            depth=state["depth"]
+            layer={"id":obj["id"],"name":name,"x":bx+bw/2,"y":by+bh/2,"w":bw,"h":bh,"rotation":0,"flip_y":False,
+                   "motion":min(2.,max(.2,1+depth*.45)),"source_depth":depth,"opacity":1,"color":[1,1,1]}
+            budget=None
+            if not baked_static[obj["id"]]:
+                budget=int(.88*(ANIMATION_PIXEL_LIMIT-assets.animated_pixels)/max(1,pending_baked+pending_surfaces+pending_frames))
+                pending_baked-=1
+            render_baked(assets,record,layer,grade,key,baked_static[obj["id"]],budget)
+            result.append(layer)
+            restored.append("逐层完整渲染")
+        elif base is not None:
             layer=dict(base)
             surface_budget = None
             if any(kind in WARP_EFFECTS for kind,_ in specs):
                 remaining = ANIMATION_PIXEL_LIMIT - assets.animated_pixels
-                surface_budget = int(.88 * remaining / max(1, pending_surfaces))
+                surface_budget = int(.88 * remaining / max(1, pending_surfaces+pending_baked+pending_frames))
                 pending_surfaces -= 1
+            elif layer.get("puppet") or layer.get("atlas"):
+                pending_frames -= 1
             try:
                 used=render_layer(assets,layer,obj,specs,grade,notes,key,surface_budget)
                 restored.extend(used)
@@ -615,6 +726,10 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                         notes.append(f"{name} · 雾尘，{exc}")
                 elif effect not in {"blurprecise"}:
                     notes.append(f"{name} · 合成层效果 {effect} 暂未转换")
+        # 一个粒子对象可生成多个图层，每层都要带独立的时段权重副本。
+        if "_time" in obj:
+            for layer in result[first_layer:]:layer["time"]=[point[:] for point in obj["_time"]]
+    assets.finish()
     details={"原图层数":len(layers),"粒子图层数":particle_count,"动效位图数":len(assets.saved),"按用户要求忽略的鼠标交互":ignored_mouse,
              "解码像素上界":sum(w*h for w,h in assets.saved.values())}
     return result,list(dict.fromkeys(restored)),details

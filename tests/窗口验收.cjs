@@ -17,22 +17,24 @@ const {Store}=require('../desktop/store.cjs');
   try{
     const page=await app.firstWindow();page.on('pageerror',error=>errors.push(error.message));
     await page.getByPlaceholder('搜索壁纸').fill('窗口回归样例');
-    await page.locator('.card-picture').click();await page.locator('canvas[data-scene-ready=true]').waitFor();
-    await page.locator('.inspector-tabs').getByRole('button',{name:'时间',exact:true}).click();
+    await page.locator('.card-picture').click();
+    // 默认图层模式预览不依赖 WebGL2；录制模式另由导出流程验证。
+    await page.locator('canvas[data-scene-ready=true]').waitFor();
+    await page.locator('.inspector-tabs').getByRole('tab',{name:'时间',exact:true}).click();
     await page.getByRole('combobox',{name:'时间格式'}).click();await page.getByRole('option',{name:'12 小时',exact:true}).click();
     assert.match(await page.getByRole('combobox',{name:'时间格式'}).innerText(),/12 小时/);
-    await page.getByRole('button',{name:'主题',exact:true}).click();
+    await page.locator('.inspector-tabs').getByRole('tab',{name:'主题',exact:true}).click();
     await page.getByRole('combobox',{name:'样例下拉列表'}).click();
     await page.getByRole('textbox',{name:'搜索样例下拉列表'}).fill('24');await page.getByRole('option',{name:'选项 24',exact:true}).click();
     assert.match(await page.getByRole('combobox',{name:'样例下拉列表'}).innerText(),/24/);
-    await page.getByRole('button',{name:'排版',exact:true}).last().click();
+    await page.locator('.inspector-tabs').getByRole('tab',{name:'排版',exact:true}).click();
     const input=page.getByRole('spinbutton',{name:'缩放数值',exact:true}),before=Number(await input.inputValue());
     await page.locator('canvas').hover();await page.mouse.wheel(0,-160);assert(Number(await input.inputValue())>before);
     for(const [width,height] of [[1280,800],[960,640],[850,560]]){
       await app.evaluate(({BrowserWindow},size)=>BrowserWindow.getAllWindows()[0].setSize(...size),[width,height]);
       await page.waitForFunction(size=>innerWidth===size[0]&&innerHeight===size[1],[width,height]);
       await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-      await page.locator('.inspector-tabs').getByRole('button',{name:'时间',exact:true}).click();await page.getByRole('combobox',{name:'时间字体'}).click();
+      await page.locator('.inspector-tabs').getByRole('tab',{name:'时间',exact:true}).click();await page.getByRole('combobox',{name:'时间字体'}).click();
       const box=await page.locator('.select-popup').boundingBox();
       assert(box.x>=0&&box.y>=0&&box.x+box.width<=width+1&&box.y+box.height<=height+1);
       await page.screenshot({path:path.join(output,`${width}x${height}.png`)});

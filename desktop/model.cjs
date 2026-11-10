@@ -11,6 +11,14 @@ const DEFAULT_LAYOUT = {
     } },
 };
 const clone = value => structuredClone(value);
+// 导出方式：layers 图层模式（默认）、record 录制模式；后几项是录制时长（秒）、帧率、首尾交叉淡化（秒）。
+const DEFAULT_EXPORT = { mode: 'layers', duration: 10, fps: 30, loop: true, fade: 0.6, quality: 'standard' };
+function exportSettings(draft) {
+  const input = { ...DEFAULT_EXPORT, ...draft?.export };
+  return { mode: input.mode === 'record' ? 'record' : 'layers', duration: bounded(input.duration, 10, 2, 30),
+    fps: [24, 30, 60].includes(Number(input.fps)) ? Number(input.fps) : 30, loop: input.loop !== false, fade: bounded(input.fade, 0.6, 0.1, 2),
+    quality: ['compact', 'high'].includes(input.quality) ? input.quality : 'standard' };
+}
 const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const bounded = (value, fallback, min, max) => Math.max(min, Math.min(max, finite(value, fallback)));
 
@@ -62,7 +70,7 @@ function defaultDraft(properties = {}, hasClock = true, deviceId = 'xiaomi-18-pr
   return { version: 1, deviceId, layout,
     appearance: { fonts: { week: '', date: '', time: '' }, colors: { week: '', date: '', time: '' } },
     motion: { amount: 0.02, sensitivity: 4, smoothing: 0.16, vertical: 0.3, fps: 30 },
-    properties: clone(properties), layers: {} };
+    export: { ...DEFAULT_EXPORT }, properties: clone(properties), layers: {} };
 }
 
 function builtinTemplates() {
@@ -83,4 +91,4 @@ function builtinTemplates() {
   ];
 }
 
-module.exports = { ROWS, DEFAULT_LAYOUT, cleanLayout, templateLayout, applyTemplate, makeTemplate, defaultDraft, builtinTemplates };
+module.exports = { ROWS, DEFAULT_LAYOUT, DEFAULT_EXPORT, exportSettings, cleanLayout, templateLayout, applyTemplate, makeTemplate, defaultDraft, builtinTemplates };

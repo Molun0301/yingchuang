@@ -7,7 +7,7 @@ class ConversionQueue extends EventEmitter {
   changed() { this.emit('change', this.snapshot()); }
   add(inputs) {
     for (const input of inputs) this.items.push({ id: randomUUID(), themeId: input.theme.id,
-      title: input.theme.title, deviceId: input.draft.deviceId, status: 'waiting', progress: 0,
+      title: input.theme.title, deviceId: input.draft.deviceId, mode: input.mode, status: 'waiting', progress: 0,
       phase: '等待', input: structuredClone(input), createdAt: Date.now() });
     this.changed(); void this.drain(); return this.snapshot();
   }

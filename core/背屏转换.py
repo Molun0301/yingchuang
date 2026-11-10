@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import io
 import json
 import math
@@ -269,6 +270,15 @@ def visible(obj, props):
     return bool(v.get("value", True))
 
 
+def scene_background(scene):
+    """场景底色：电脑上各图层透明处露出的颜色，未设置时渲染器按黑色清屏。"""
+    general = scene.get("general", {})
+    if general.get("clearenabled") is False:
+        return "#000000"
+    rgb = vector(general.get("clearcolor"), [0., 0., 0.])[:3]
+    return "#" + "".join(f"{max(0, min(255, round(v * 255))):02x}" for v in rgb)
+
+
 def property_value(raw, properties, default=None):
     if isinstance(raw, dict) and isinstance(raw.get("user"), str):
         prop = properties.get(raw["user"], {})
@@ -379,7 +389,7 @@ def layer_geometry(state, size, height):
 
 
 def scene_layers(source, config, data=None, worlds=None, stage=None, media_root=None, fast=False):
-    from 场景动效 import SceneAssets, atlas_frames
+    from 场景动效 import SceneAssets, atlas_frames, effects_for
     pkg, project, scene, sw, sh, props = data if data is not None else read_scene(source)
     objects = scene["objects"]
     layers, notes = [], []
@@ -414,6 +424,12 @@ def scene_layers(source, config, data=None, worlds=None, stage=None, media_root=
             if len(passes) != 1 or p.get("shader", "").lower() not in {"genericimage", "genericimage2", "genericimage4"}:
                 raise ConversionError("不是支持的单通道平面材质")
             texture = p["textures"][0]
+            # 混合特效按权重叠加其他视频（如按时段切换的清晨、白天、黄昏画面）：权重过半的一路就是该状态的画面。
+            for effect, spec in effects_for(obj, props):
+                if effect == "blend" and not int(spec["combos"].get("BLENDMODE", 0)) and assets.is_video(texture):
+                    weights = [float(spec["values"].get("multiply" + (str(i) if i > 1 else ""), 0) or 0) for i in range(1, len(spec["textures"]))]
+                    if weights and max(weights) >= .5 and spec["textures"][weights.index(max(weights)) + 1]:
+                        texture = spec["textures"][weights.index(max(weights)) + 1]
             if assets.is_video(texture):
                 if stage is None:
                     raise ConversionError("视频图层需要输出资源目录")
@@ -483,6 +499,27 @@ def load_config(path):
 
 def number(x):
     return f"{x:.7f}".rstrip("0").rstrip(".") or "0"
+
+
+def time_weight(points, minute):
+    for (start,left),(end,right) in zip(points,points[1:]):
+        if minute<=end:return max(0,min(1,left+(right-left)*(minute-start)/(end-start)))
+    return points[-1][1]
+
+
+def time_weight_expression(points):
+    # 用斜率增量表达折线，避免为每段重复嵌套条件判断。
+    # 硬切换仅相隔 0.01 分钟，保留斜率精度才能对齐视频的 0.5 边界。
+    def precise(value):return f"{value:.17f}".rstrip("0").rstrip(".") or "0"
+    expression=precise(points[0][1])
+    previous=0
+    for (start,left),(end,right) in zip(points,points[1:]):
+        slope=(right-left)/(end-start)
+        change=slope-previous
+        if change:
+            expression+=("+" if change>0 else "-")+f"{precise(abs(change))}*max(0,(#hour24*60+#minute)-{precise(start)})"
+        previous=slope
+    return f"max(0,min(1,{expression}))"
 
 
 def element(parent, tag, **attrs):
@@ -576,7 +613,7 @@ def add_clock(root, layout, config):
                     w=f"{part['w']}*#clock_unit", **attrs, **align)
 
 
-def make_manifest(sw, sh, layers, c, clock=None):
+def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
     root = ET.Element("Widget", version="2", screenWidth=str(int(c.get("预览宽度",1080))), scaleByDensity="false",
                       frameRate=str(int(c["帧率"])), useVariableUpdater="DateTime.Second" if c["显示秒"] else "DateTime.Minute")
     binders = element(root, "VariableBinders")
@@ -609,16 +646,28 @@ def make_manifest(sw, sh, layers, c, clock=None):
     element(root, "Var", name="scene_top", expression=f"min(-#view_height*{number(extra_y)},max(#view_height-{number(sh)}*#scene_scale+#view_height*{number(extra_y)},(#view_height-{number(sh)}*#scene_scale)*{number(c['纵向取景'])}))")
     has_video=any(layer.get("video") for layer in layers)
     if has_video:root.set("transparentSurface","true")
-    else:element(root, "Rectangle", w="#view_width", h="#view_height", fillColor="#061633")
+    else:element(root, "Rectangle", w="#view_width", h="#view_height", fillColor=background)
+    video_visibility={}
     for layer in layers:
         motion = number(layer["motion"])
+        weight=time_weight_expression(layer["time"]) if "time" in layer else None
         if layer.get("video"):
-            element(root,"Video",name="video_"+str(layer["id"]),layerType="bottom",
+            target="video_"+str(layer["id"])
+            video=element(root,"Video",name=target,layerType="bottom",
                     x=f"#scene_left+{number(layer['x']-layer['w']/2)}*#scene_scale+#move_x*#view_width*{amp}*{motion}",
                     y=f"#scene_top+{number(layer['y']-layer['h']/2)}*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}",
                     w=f"{number(layer['w'])}*#scene_scale",h=f"{number(layer['h'])}*#scene_scale")
+            if weight is not None:
+                visibility=f"gt({weight},0.5)"
+                video.set("visibility",visibility);video_visibility[target]=visibility
+                # 只在跨过可见阈值时触发，渐变过程中不反复重启视频。
+                variable=target+"_visible"
+                trigger=element(element(root,"Var",name=variable,expression=visibility,threshold="0"),"Trigger")
+                element(trigger,"VideoCommand",target=target,command="play",condition="#"+variable)
+                element(trigger,"VideoCommand",target=target,command="pause",condition=f"eq(#{variable},0)")
             continue
-        image = element(root, "Image", name="layer_" + str(layer["id"]), src=layer["asset"],
+        parent=element(root,"Group",name="time_"+str(layer["id"]),alpha=f"255*({weight})") if weight is not None else root
+        image = element(parent, "Image", name="layer_" + str(layer["id"]), src=layer["asset"],
                 x=f"#scene_left+{number(layer['x'])}*#scene_scale+#move_x*#view_width*{amp}*{motion}",
                 y=f"#scene_top+{number(layer['y'])}*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}",
                 w=f"{number(layer['w'])}*#scene_scale", h=f"{number(layer['h'])}*#scene_scale",
@@ -649,7 +698,8 @@ def make_manifest(sw, sh, layers, c, clock=None):
         for layer in layers:
             if layer.get("video"):
                 target="video_"+str(layer["id"])
-                element(resume,"VideoCommand",target=target,command="play")
+                condition={"condition":video_visibility[target]} if target in video_visibility else {}
+                element(resume,"VideoCommand",target=target,command="play",**condition)
                 element(resume,"VideoCommand",target=target,command="setVolume",volume=number(c.get("视频音量",0)))
                 element(pause,"VideoCommand",target=target,command="pause")
     return xml_bytes(root)
@@ -667,13 +717,19 @@ def geometry(sw, sh, layers, c, width, height, dx=0, dy=0):
              "w": x["w"] * scale, "h": x["h"] * scale} for x in layers]
 
 
-def still_preview(sw, sh, layers, c, clock=None, stage=None):
+def still_preview(sw, sh, layers, c, clock=None, stage=None, background="#061633"):
     w, h = int(c["预览宽度"]), int(c["预览高度"])
-    canvas = Image.new("RGBA", (w, h), "#061633")
+    canvas = Image.new("RGBA", (w, h), background)
+    now=datetime.now();minute=now.hour*60+now.minute
     for layer, box in zip(layers, geometry(sw, sh, layers, c, w, h)):
         if "image" not in layer:
             continue
         im=layer["image"]
+        if "time" in layer:
+            weight=time_weight(layer["time"],minute)
+            if weight<=1e-6:continue
+            im=im.copy()
+            im.putalpha(im.getchannel("A").point(lambda alpha:round(alpha*weight)))
         angle=math.radians(layer["rotation"])
         co,si=math.cos(angle),math.sin(angle)
         sx,sy=im.width/box["w"],im.height/box["h"]
@@ -762,8 +818,8 @@ def picture_layers(source, stage, config):
         return width,height,[layer],["图片帧动画"]
 
 
-def write_product(stage, sw, sh, layers, config, name, restored, notes, details, source_type, clock=None):
-    manifest=make_manifest(sw,sh,layers,config,clock)
+def write_product(stage, sw, sh, layers, config, name, restored, notes, details, source_type, clock=None, background="#061633"):
+    manifest=make_manifest(sw,sh,layers,config,clock,background)
     (stage/"manifest.xml").write_bytes(manifest)
     title=name+(" · 动效背屏" if restored else " · 感应背屏")
     description="支持分层视差和点击居中。"
@@ -786,12 +842,12 @@ def write_product(stage, sw, sh, layers, config, name, restored, notes, details,
     field=element(cover,"ImageSelect",name="rear_cover",displayTitle="封面预览",width="300",height="183")
     element(field,"item").text="preview.jpg"
     (stage/"var_config.xml").write_bytes(xml_bytes(cover))
-    preview=still_preview(sw,sh,layers,config,clock,stage)
+    preview=still_preview(sw,sh,layers,config,clock,stage,background)
     preview.save(stage/"画面预览.jpg",quality=92)
     preview.save(stage/"preview.jpg",quality=90)
     clean_layers=[{k:v for k,v in layer.items() if k not in {"image","native_size","atlas","puppet"}} for layer in layers]
     payload={"width":sw,"height":sh,"title":name,"config":config,"clock":clock,
-             "restored":restored,"layers":clean_layers}
+             "restored":restored,"layers":clean_layers,"background":background}
     template=(ROOT/"预览模板.html").read_text(encoding="utf-8")
     encoded=json.dumps(payload,ensure_ascii=False,allow_nan=False).replace("<","\\u003c")
     (stage/"交互预览.html").write_text(template.replace("__SCENE_DATA__",encoded),encoding="utf-8")
@@ -860,6 +916,7 @@ def convert(source, destination, config, title=None, font_overrides=None, no_clo
             config["署名"]=config["署名"] or str(project.get("author") or "")
             layers,restored,details=build_motion_scene(pkg,scene,props,layers,worlds,stage,decode_tex,layer_geometry,notes)
             source_type=getattr(pkg,"version","解包场景")
+            background=scene_background(scene)
         else:
             if not no_clock:
                 fonts=select_fonts(None,[],{},{},font_overrides)
@@ -867,7 +924,8 @@ def convert(source, destination, config, title=None, font_overrides=None, no_clo
             sw,sh,layers,restored=picture_layers(source,stage,config)
             name,details,source_type=source.stem,{},suffix.lstrip(".").upper()
             notes.append("图片输入使用整体感应平移。")
-        package,report=write_product(stage,sw,sh,layers,config,str(title or name),restored,notes,details,source_type,clock)
+            background="#061633"
+        package,report=write_product(stage,sw,sh,layers,config,str(title or name),restored,notes,details,source_type,clock,background)
         os.replace(stage,destination)
     return destination/package.name,report
 

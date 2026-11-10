@@ -1,4 +1,7 @@
-映窗使用 Electron、React、Lucide、QuickJS、Python、Pillow、NumPy、LZ4、fontTools 和 imageio-ffmpeg。
+映窗使用 Electron、React、Lucide、QuickJS、WebWallGL、Mediabunny、Python、Pillow、NumPy、LZ4、fontTools 和 imageio-ffmpeg。
 相关许可证保留在本目录，Python 和 Chromium 的许可同时随各自运行时分发。
-FFmpeg 构建与对应源码说明：https://github.com/imageio/imageio-ffmpeg/tree/v0.6.0
+映窗自身源码以 MIT 许可证发布，全文见随包的“映窗-MIT许可证.txt”。
+FFmpeg 可执行程序按 GPL-3.0 授权（启用 libx264 及 NVENC、QSV、AMF 硬件编码），映窗以独立进程调用，许可全文见 FFmpeg-GPL-3.0.txt。
+Linux 与 Windows 版均为 BtbN FFmpeg-Builds 的 8.1 GPL 构建，来源与构建脚本：https://github.com/BtbN/FFmpeg-Builds ；FFmpeg 官方源码：https://ffmpeg.org/releases/ 。imageio-ffmpeg 仅作为调用接口，不附带其 FFmpeg 二进制。
 纹理格式解析参考 RePKG，其 MIT 许可证位于 core/RePKG许可证.txt。
+完整画面渲染使用 WebWallGL 3.0.1（MIT，https://github.com/oneincase/webwallgl）及其编辑器接口包；其依赖 Mediabunny 按 MPL-2.0 原样随前端打包，源码见 https://github.com/Vanilagy/mediabunny。

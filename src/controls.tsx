@@ -14,8 +14,8 @@ export function Slider({label,value,min,max,step=1,onChange,suffix='',digits=0}:
   return <label className="slider-field"><span className="field-heading"><span>{label}</span><span className="number-field"><input aria-label={`${label}数值`} type="number" value={Number(value.toFixed(digits))} min={min} max={max} step={step} onChange={e=>{if(e.target.value!=='')onChange(Math.max(min,Math.min(max,Number(e.target.value))));}}/>{suffix}</span></span>
     <input aria-label={label} type="range" value={value} min={min} max={max} step={step} style={{'--range':`${(value-min)/(max-min)*100}%`} as React.CSSProperties} onChange={e=>onChange(Number(e.target.value))}/></label>;
 }
-export function Toggle({label,checked,onChange}:{label:string;checked:boolean;onChange:(value:boolean)=>void}){
-  return <label className="toggle-field"><span>{label}</span><input type="checkbox" role="switch" checked={checked} onChange={e=>onChange(e.target.checked)}/><span className="switch-track"/></label>;
+export function Toggle({label,checked,onChange,hideLabel=false}:{label:string;checked:boolean;onChange:(value:boolean)=>void;hideLabel?:boolean}){
+  return <label className="toggle-field"><span className={hideLabel?'sr-only':''}>{label}</span><input type="checkbox" role="switch" checked={checked} onChange={e=>onChange(e.target.checked)}/><span className="switch-track"/></label>;
 }
 export function PropertyControl({property,value,onChange}:{property:Property;value:unknown;onChange:(v:unknown)=>void}){
   const {label,type}=property;

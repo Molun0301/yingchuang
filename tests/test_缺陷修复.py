@@ -95,7 +95,9 @@ def test_embedded_video_uses_container_index(version,extended,tmp_path):
     with pytest.raises(ValueError):extract_texture_video(video_texture(payload,version,extended)[:-4],tmp_path,'截断')
 
 
-def test_video_scene_preview_and_export_keep_actual_video(tmp_path):
+def test_video_scene_preview_and_export_keep_actual_video(tmp_path,monkeypatch):
+    # 本测试核对视频原样保留，导出压缩的裁切由 test_画质压缩.py 覆盖。
+    import 画质压缩;monkeypatch.setattr(画质压缩,'fit_layers',lambda *args:{})
     original=tmp_path/'source.mp4'
     subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-v','error','-f','lavfi','-i','testsrc2=size=64x48:rate=5',
                     '-t','1','-c:v','libx264','-pix_fmt','yuv420p',str(original)],check=True)

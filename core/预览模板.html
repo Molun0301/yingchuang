@@ -177,11 +177,22 @@ function drawClock(date) {
   }
 }
 
+// 随时段变化的图层：按当天分钟在关键点之间线性插值，与背屏上的透明度表达式一致。
+function timeWeight(points, minute) {
+  let i = 1;
+  while (i < points.length - 1 && points[i][0] < minute) i++;
+  const [x0, y0] = points[i - 1], [x1, y1] = points[i];
+  return x1 === x0 ? y1 : y0 + (y1 - y0) * (minute - x0) / (x1 - x0);
+}
+
 function renderScene(ms, date, tiltX, tiltY) {
-  ctx.fillStyle = '#061633';
+  ctx.fillStyle = scene.background || '#061633';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const minute = date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
   for (const layer of scene.layers) {
-    const alpha = layer.fade?.length ? interpolate(layer.fade, ms)[0] / 255 : 1;
+    let alpha = layer.fade?.length ? interpolate(layer.fade, ms)[0] / 255 : 1;
+    // 视频在权重过半时显示，图片按权重渐变。
+    if (layer.time) { const weight = timeWeight(layer.time, minute); alpha *= layer.video ? (weight > .5 ? 1 : 0) : weight; }
     if (alpha <= 0) continue;
     const [px, py] = layer.travel?.length ? interpolate(layer.travel, ms) : [0, 0];
     const x = sceneLeft + (layer.x + px) * scale + tiltX * canvas.width * config['感应幅度'] * layer.motion;

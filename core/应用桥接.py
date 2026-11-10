@@ -20,12 +20,12 @@ from PIL import Image
 from fontTools.ttLib import TTFont
 import 背屏转换 as converter
 import 背屏时钟 as clockwork
-from 场景动效 import build_motion_scene
+from 场景动效 import SceneAssets, build_motion_scene, effects_for, sprite_settings
 
 if os.environ.get("YINGCHUANG_CORE"):
     converter.ROOT = Path(os.environ["YINGCHUANG_CORE"])
 
-CACHE_VERSION = 9
+CACHE_VERSION = 11
 ROLE_KEYS = dict(zip(clockwork.ROLES, ("week", "date", "time")))
 
 
@@ -153,15 +153,29 @@ def font_name(data, fallback):
         return fallback
 
 
+def raw_clock_ids(theme):
+    """完整画面模式也要隐藏原主题的时钟文字层；透视场景不经正交检查直接读取图层。"""
+    source = Path(theme["source"])
+    pkg = converter.Package(source) if source.suffix.lower() == ".pkg" else converter.SceneFolder(source)
+    name = source.name if isinstance(pkg, converter.SceneFolder) else "scene.json"
+    objects = pkg.json(name).get("objects", [])
+    return [obj["id"] for obj in objects if isinstance(obj, dict) and "text" in obj
+            and isinstance(converter.value(obj["text"], ""), str) and clockwork.clock_roles(obj, converter.value(obj["text"], ""))]
+
+
 def inspect_theme(request):
     theme = request["theme"]
     if theme["type"] != "scene":
-        return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None,
-                "renderable": theme["type"] in {"image", "video"}, "fontIssue": ""}
+        return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None, "clockLayerIds": [],
+                "renderable": theme["type"] in {"image", "video"}, "fontIssue": "",
+                **({} if theme["type"] in {"image", "video"} else {"reason": "原生图层只支持场景、图片和视频，请使用完整画面导出。"})}
     try:
         pkg, project, scene, width, height, props = loaded_scene(theme, request.get("draft", {}))
     except ValueError as exc:
-        return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None, "renderable": False, "fontIssue": "", "reason": str(exc)}
+        try: clock_ids = raw_clock_ids(theme)
+        except (ValueError, OSError, KeyError): clock_ids = []
+        return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None, "renderable": False, "fontIssue": "",
+                "reason": str(exc), "clockLayerIds": clock_ids}
     worlds = converter.world_transforms(scene["objects"], props, width, height, [])
     candidates, role_fonts = clockwork.theme_font_sources(scene["objects"], worlds, props)
     font_paths=set(candidates)
@@ -200,8 +214,68 @@ def inspect_theme(request):
     clock_ids=[obj["id"] for obj in original["objects"] if "text" in obj and isinstance(converter.value(obj["text"],""),str)
                and clockwork.clock_roles(obj,converter.value(obj["text"],""))]
     return {"hasClock": has_clock, "fonts": fonts, "sourceFonts": source_fonts, "sourceColors": source_colors,
-            "fontIssue": font_issue, "layers": layers, "sourceSize": [width,height], "renderable": True,
+            "fontIssue": font_issue, "layers": layers, "sourceSize": [width,height], "renderable": True, "clockLayerIds": clock_ids,
             "scriptInput":{"scene":original,"properties":original_props,"width":width,"height":height,"clockLayerIds":clock_ids}}
+
+
+def layer_plan(request):
+    """
+    逐层渲染的规划：所有可见图层逐个单独渲染，保留逐层感应。
+    合成、投影、全屏层取下方已绘制的画面再处理：下方只有一个感应幅度相同的图层时（如只处理背景的模糊层），
+    两者渲染成一层（members），画面与电脑一致且不减少图层；下方有多个图层时不合并，隐藏并记录。
+    varying 为随时段变化的对象，不参与合成。
+    """
+    theme = request["theme"]
+    pkg,_,scene,sw,sh,props = loaded_scene(theme,request.get("draft",{}))
+    worlds = converter.world_transforms(scene["objects"],props,sw,sh,[])
+    assets = SceneAssets(pkg,None,converter.decode_tex)
+    clock_ids = set(raw_clock_ids(theme))
+    varying = set(request.get("varying",[]))
+    targets,hidden,unsupported = [],[],[]
+    # 下方有背屏另行播放的视频时，渲染器取不到它的画面，不能合成。
+    captured = True
+    for obj in scene["objects"]:
+        state = worlds.get(obj["id"])
+        if state is None or state["alpha"]<=0:continue
+        name = str(obj.get("name",obj["id"]))
+        image = obj.get("image")
+        if isinstance(image,str):
+            specs = effects_for(obj,props)
+            # 全屏、合成、投影层取下方已绘制的画面再处理，单独渲染只会得到不透明的空白。
+            if image.startswith("models/util/") and image!="models/util/solidlayer.json":
+                if not any(kind=="clouds" for kind,_ in specs):
+                    effects = sorted({kind for kind,_ in specs if kind not in {"color_grading"}})
+                    motion = min(2.,max(.2,1+state["depth"]*.45))
+                    if effects and captured and len(targets)==1 and targets[0]["kind"]!="particle" and targets[0]["motion"]==motion and targets[0]["id"] not in varying:
+                        below = targets.pop()
+                        targets.append({"id":obj["id"],"name":below["name"],"kind":"image","reason":"合成层","motion":motion,"members":[below["id"],*below.get("members",[])]})
+                        continue
+                    if effects:unsupported.append({"id":obj["id"],"name":name,"reason":"全屏后期效果 "+"、".join(effects)+" 无法逐层还原"})
+                    hidden.append(obj["id"]);continue
+                kind = "image"
+            else:
+                if image.startswith("models/util/") and any("audio_bars" in effect.get("file","").lower() for effect in obj.get("effects",[])):
+                    continue
+                if image!="models/util/solidlayer.json":
+                    model = assets.json(image)
+                    passes = assets.json(model["material"])["passes"]
+                    # 视频图层由背屏视频元素播放。
+                    if passes and passes[0].get("textures") and assets.is_video(passes[0]["textures"][0]):
+                        captured = False;continue
+                kind = "image"
+        elif isinstance(obj.get("particle"),str) and obj["particle"]:
+            descriptor = assets.json(obj["particle"])
+            if any((point.get("flags",0) or 0)&1 for point in descriptor.get("controlpoint",[])):continue
+            kind = "particle"
+        elif "text" in obj and obj["id"] in clock_ids:
+            hidden.append(obj["id"]);continue
+        elif "text" in obj:
+            kind = "text"
+        else:
+            continue
+        # 与录制模式使用同一渲染器，默认画面一致；转换核心自己的近似渲染只在渲染器不可用时使用。
+        targets.append({"id":obj["id"],"name":name,"kind":kind,"reason":"完整渲染","motion":min(2.,max(.2,1+state["depth"]*.45))})
+    return {"targets":targets,"hidden":hidden,"unsupported":unsupported}
 
 
 def config_for(draft, device):
@@ -215,11 +289,18 @@ def config_for(draft, device):
               "平滑系数": motion.get("smoothing",.16), "纵向感应比例": motion.get("vertical",.3),
               "帧率": motion.get("fps",30), "时钟排版": deepcopy(layout["clock"]["rows"]),
               "视频音量": draft.get("properties",{}).get("__videoVolume",0),
-              "时钟颜色": deepcopy(draft.get("appearance",{}).get("colors",{}))})
+              "时钟颜色": deepcopy(draft.get("appearance",{}).get("colors",{})),
+              "导出画质": draft.get("export",{}).get("quality","standard")})
     return c
 
 
-def graphic_key(theme, draft):
+def baked_version(record):
+    if record.get("empty"):return ["empty"]
+    item=(Path(record["dir"])/"frames.rgba.gz").stat()
+    return [record["dir"],record["count"],record["width"],record["height"],record["fps"],record["bbox"],item.st_size,item.st_mtime_ns]
+
+
+def graphic_key(theme, draft, baked=None, time_variants=None):
     source = Path(theme["source"])
     stat = source.stat()
     file_versions={}
@@ -230,7 +311,14 @@ def graphic_key(theme, draft):
             try:
                 item=Path(value).stat();file_versions[definition["key"]]=[item.st_size,item.st_mtime_ns]
             except OSError:pass
-    identity={"version": CACHE_VERSION, "path": str(source), "mtime": stat.st_mtime_ns, "size": stat.st_size,"files":file_versions,
+    baked_versions={identifier:baked_version(record) for identifier,record in (baked or {}).items()}
+    variants=None
+    if time_variants:
+        variants={"scenes":[digest(scene) for scene in time_variants["scenes"]],
+                  "objects":{identifier:[{**variant,"baked":baked_version(variant["baked"]) if variant.get("baked") else None}
+                                         for variant in records] for identifier,records in time_variants["objects"].items()}}
+    identity={"version": CACHE_VERSION, "path": str(source), "mtime": stat.st_mtime_ns, "size": stat.st_size,"files":file_versions,"baked":baked_versions,
+                   "timeVariants":variants,
                    "properties": draft.get("properties",{}), "layers": draft.get("layers",{}),
                    "clock": draft["layout"]["clock"]["enabled"], "engineRoots": theme.get("engineRoots",[]),"script":theme.get("scriptSignature")}
     if theme["type"] in {"video","scene"}:
@@ -242,9 +330,33 @@ def graphic_key(theme, draft):
     return digest(identity)
 
 
+def time_variant_scene(scene, worlds, properties, sw, sh, variants, baked, notes):
+    # 先在原场景计算父子变换，再展开对象；渲染管线只会读取真正需要输出的状态。
+    scenes=variants["scenes"]
+    by_id=[{obj["id"]:obj for obj in item["objects"]} for item in scenes]
+    transforms=[converter.world_transforms(item["objects"],properties,sw,sh,notes) for item in scenes]
+    objects=[];worlds=dict(worlds)
+    baked={identifier:record for identifier,record in baked.items() if identifier not in variants["objects"]}
+    for obj in scene["objects"]:
+        identifier=str(obj["id"])
+        if identifier not in variants["objects"]:
+            objects.append(obj)
+            continue
+        for index,variant in enumerate(variants["objects"][identifier]):
+            state=transforms[variant["scene"]][obj["id"]]
+            if state is None or state["alpha"]<=0:continue
+            current=deepcopy(by_id[variant["scene"]][obj["id"]])
+            current.update(id=f"{identifier}_t{index}",_time=deepcopy(variant["alpha"]),_time_index=index)
+            objects.append(current);worlds[current["id"]]=state
+            if variant.get("baked"):baked[current["id"]]=variant["baked"]
+    return {**scene,"objects":objects},worlds,baked
+
+
 def prepare_graphics(request, fast=False):
     theme, draft = request["theme"], request["draft"]
-    key=graphic_key(theme,draft)
+    baked=request.get("baked",{})
+    time_variants=None if fast else request.get("timeVariants")
+    key=graphic_key(theme,draft,baked,time_variants)
     root = Path(request["cacheRoot"])/"scenes"/key
     if fast and not (root/"场景.json").is_file():root=Path(request["cacheRoot"])/"previews"/key
     saved = root/"场景.json"
@@ -256,20 +368,34 @@ def prepare_graphics(request, fast=False):
         (stage/"assets").mkdir(parents=True)
         config = config_for(draft,request["device"])
         if fast:config["纹理最长边"]=1280
-        notes, details = [], {}
+        notes, details, background = [], {}, "#061633"
         if theme["type"] == "scene":
             data = loaded_scene(theme,draft)
             pkg,project,scene,sw,sh,props = data
+            background = converter.scene_background(scene)
             worlds = converter.world_transforms(scene["objects"],props,sw,sh,notes)
+            if time_variants:
+                scene,worlds,baked=time_variant_scene(scene,worlds,props,sw,sh,time_variants,baked,notes)
             for obj in scene["objects"]:
                 if "text" not in obj:continue
                 raw = converter.value(obj.get("text"), "")
                 if isinstance(raw,str) and clockwork.clock_roles(obj,raw): worlds[obj["id"]] = None
             media_root=Path(request["cacheRoot"])/"media"/digest([theme["source"],Path(theme["source"]).stat().st_mtime_ns])
-            _,_,layers,layer_notes,name = converter.scene_layers(Path(theme["source"]),config,data,worlds,stage,media_root,fast)
-            notes.extend(layer_notes)
+            # 已烘焙的图层不再解码原材质；纯烘焙场景也可直接进入动效管线。
+            native_objects=[obj for obj in scene["objects"] if str(obj["id"]) not in baked and (worlds.get(obj["id"]) or {}).get("alpha",0)>0
+                            and isinstance(obj.get("image"),str) and obj["image"]
+                            and (not obj["image"].startswith("models/util/") or obj["image"]=="models/util/solidlayer.json"
+                                 and not any("audio_bars" in effect.get("file","").lower() for effect in obj.get("effects",[])))]
+            if native_objects:
+                native_data=(pkg,project,{**scene,"objects":native_objects},sw,sh,props)
+                _,_,layers,layer_notes,name = converter.scene_layers(Path(theme["source"]),config,native_data,worlds,stage,media_root,fast)
+                notes.extend(layer_notes)
+            else:layers,name=[],project.get("title",Path(theme["source"]).parent.name)
             event("读取图层" if fast else "生成场景动效", 22)
-            layers,restored,details = build_motion_scene(pkg,scene,props,layers,worlds,stage,converter.decode_tex,converter.layer_geometry,notes,fast=fast,fps=draft["motion"]["fps"])
+            layers,restored,details = build_motion_scene(pkg,scene,props,layers,worlds,stage,converter.decode_tex,converter.layer_geometry,notes,fast=fast,fps=draft["motion"]["fps"],baked=baked)
+            timed_objects=time_variants["objects"] if time_variants else {}
+            details["时段变化"]={"对象数":len(timed_objects),"变体数":sum(len(records) for records in timed_objects.values())}
+            if any(timed_objects.values()):restored.append("随时段变化")
             script_result=theme.get("scriptResult",{})
             if script_result.get("evaluated"):
                 restored.append("脚本属性初始状态")
@@ -297,15 +423,23 @@ def prepare_graphics(request, fast=False):
             raise ValueError("此类主题的背屏转换尚未接入。")
         clean = [{k:v for k,v in layer.items() if k not in {"image","native_size","atlas","puppet"}} for layer in layers]
         if not clean: raise ValueError("主题中没有可输出的画面图层。")
-        payload = {"width":sw,"height":sh,"title":theme["title"],"layers":clean,"restored":restored,"notes":list(dict.fromkeys(notes)),"details":details,"progressive":fast and theme["type"]!="image"}
+        payload = {"width":sw,"height":sh,"title":theme["title"],"layers":clean,"restored":restored,"notes":list(dict.fromkeys(notes)),"details":details,"progressive":fast and theme["type"]!="image","background":background}
         atomic_json(stage/"场景.json",payload)
         commit_cache(stage,root,"场景.json")
     return root,payload
 
 
+def flat_scene(theme):
+    try:
+        converter.read_scene(Path(theme["source"]))
+        return True
+    except ValueError:
+        return False
+
+
 def selected_clock_fonts(theme,draft):
     explicit = draft.get("appearance",{}).get("fonts",{})
-    if theme["type"] == "scene":
+    if theme["type"] == "scene" and flat_scene(theme):
         pkg,_,scene,sw,sh,props = loaded_scene(theme,draft)
         worlds = converter.world_transforms(scene["objects"],props,sw,sh,[])
         original_theme={k:v for k,v in theme.items() if k not in {"resolvedScene","scriptResult"}}
@@ -344,7 +478,7 @@ def prepare_clock(request,config):
     if not request["draft"]["layout"]["clock"]["enabled"]: return None,None
     theme,draft = request["theme"],request["draft"]
     selected = selected_clock_fonts(theme,draft)
-    if theme["type"]=="scene":
+    if theme["type"]=="scene" and flat_scene(theme):
         pkg,_,scene,w,h,props=loaded_scene(theme,draft)
         worlds=converter.world_transforms(scene["objects"],props,w,h,[])
         candidates={key:[] for key in ROLE_KEYS.values()}
@@ -380,10 +514,27 @@ def prepare_clock(request,config):
     return root,clock
 
 
+def prepare_recording(request):
+    """完整画面的录制结果作为整幅视频图层；取景已在录制时完成，感应时整幅位移。"""
+    from 视频处理 import poster
+    recording = request["recording"]
+    root = Path(request["scratchRoot"])/"recorded"
+    (root/"assets").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(recording["path"], root/"assets/wallpaper.mp4")
+    poster(root/"assets/wallpaper.mp4", root/"assets/poster.jpg")
+    sw, sh = recording["width"], recording["height"]
+    layers = [{"id":"video","asset":"assets/poster.jpg","video":"assets/wallpaper.mp4","x":sw/2,"y":sh/2,"w":sw,"h":sh,"rotation":0,"motion":1}]
+    notes = ["完整画面按录制时长循环播放；音频响应、鼠标交互和持续变化的脚本按录制时段固定。"]
+    details = {"渲染方式":"完整画面录制","录制尺寸":[sw,sh],"帧率":recording["fps"],"时长":recording["duration"],"循环过渡":recording.get("fade",0)}
+    return root, {"width":sw,"height":sh,"title":request["theme"]["title"],"layers":layers,"restored":["完整画面"],"notes":notes,"details":details}
+
+
 def prepare(request, fast=False):
-    root,payload = prepare_graphics(request,fast=fast)
-    event("更新排版",94 if request["theme"]["type"]=="video" else 85)
+    recorded = bool(request.get("recording"))
+    root,payload = prepare_recording(request) if recorded else prepare_graphics(request,fast=fast)
+    event("更新排版",94 if recorded or request["theme"]["type"]=="video" else 85)
     config = config_for(request["draft"],request["device"])
+    if recorded:config.update({"画面缩放":1,"横向取景":.5,"纵向取景":.5})
     try:clock_root,clock = prepare_clock(request,config)
     except ValueError as exc:
         if request.get("operation")=="export":raise
@@ -407,16 +558,21 @@ def export(request):
         shutil.copytree(Path(payload["assetRoot"])/"assets",stage/"assets")
         if payload["clockRoot"]:
             for file in (Path(payload["clockRoot"])/"assets").iterdir():shutil.copy2(file,stage/"assets"/file.name)
-        event("生成背屏包",94)
         layers = deepcopy(payload["layers"])
+        # 按背屏实际显示尺寸裁切与缩小贴图、视频，2K/4K 素材超出的像素在背屏上不可见。
+        event("压缩资源",90)
+        from 画质压缩 import fit_layers
+        compression = fit_layers(stage,layers,payload["config"],payload["width"],payload["height"])
+        event("生成背屏包",94)
         for layer in layers:
             with Image.open(stage/layer["asset"]) as im:layer["image"] = im.convert("RGBA")
         package,report = converter.write_product(stage,payload["width"],payload["height"],layers,payload["config"],
-            request["theme"]["title"],payload["restored"],payload["notes"],payload["details"],request["theme"]["type"],payload["clock"])
+            request["theme"]["title"],payload["restored"],payload["notes"],payload["details"],request["theme"]["type"],payload["clock"],payload.get("background","#061633"))
         report.update({"目标":device,"输出尺寸":[request["device"]["width"],request["device"]["height"]],
                        "主题设置":request["draft"].get("properties",{}),"排版":request["draft"]["layout"]})
+        report["效果详情"]["导出压缩"]={**compression,"画质":payload["config"]["导出画质"]}
         atomic_json(stage/"转换报告.json",report)
-        result={"path":str(folder/package.name),"folder":str(folder),"notes":len(report.get("未迁移及注意事项",[]))}
+        result={"path":str(folder/package.name),"folder":str(folder),"notes":len(report.get("未迁移及注意事项",[])),"size":package.stat().st_size}
         atomic_json(Path(request["scratchRoot"])/"job-result.json",result)
         os.replace(stage,folder)
     return result
@@ -456,7 +612,12 @@ def main():
         clock_ids=[obj["id"] for obj in scene["objects"] if "text" in obj and isinstance(converter.value(obj.get("text"),""),str) and clockwork.clock_roles(obj,converter.value(obj.get("text"),""))]
         result={"scene":scene,"width":width,"height":height,"properties":properties,"clockLayerIds":clock_ids}
     elif operation == "inspect": result = inspect_theme(request)
+    elif operation == "layer-plans":
+        result = [layer_plan({**request,"theme":{**request["theme"],"resolvedScene":scene}}) for scene in request["scenes"]]
     elif operation == "fonts": result = list_fonts()
+    elif operation == "ffmpeg":
+        import imageio_ffmpeg
+        result = {"path": imageio_ffmpeg.get_ffmpeg_exe()}
     elif operation == "preview": result = prepare(request,fast=True)
     elif operation == "motion-preview": result = prepare(request)
     elif operation == "export": result = export(request)

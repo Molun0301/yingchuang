@@ -134,7 +134,11 @@ async function discover(extraRoots = []) {
     unique.add(real);
     const stat = await fs.stat(path.join(real, 'project.json'));
     let preview = project.preview ? path.resolve(real, project.preview) : '';
-    const sourceType = String(project.type || 'scene').toLowerCase();
+    // 早期官方工程没有 type 字段，按入口文件判断类型。
+    const extension = path.extname(String(project.file || '')).toLowerCase();
+    const inferred = ['.html', '.htm'].includes(extension) ? 'web' : extension === '.exe' ? 'application'
+      : ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.wmv', '.ogv'].includes(extension) ? 'video' : 'scene';
+    const sourceType = String(project.type || inferred).toLowerCase();
     let source = path.resolve(real, project.file || 'scene.pkg');
     if (sourceType === 'scene') {
       try { await fs.access(path.join(real, 'scene.pkg')); source = path.join(real, 'scene.pkg'); } catch {}

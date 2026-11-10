@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import imageio_ffmpeg
+from 硬件编码 import encoder_args
 
 
 def extract_texture_video(data, directory, name):
@@ -62,7 +63,7 @@ def encode(source,output,fps=30,speed=1,event=None):
     audio_filters="atempo=0.5,atempo="+str(speed/.5) if speed<.5 else "atempo="+str(speed)
     command=[imageio_ffmpeg.get_ffmpeg_exe(),"-hide_banner","-loglevel","error","-y","-i",str(source),
              "-map","0:v:0","-map","0:a?","-vf",f"setpts=PTS/{speed},fps={int(fps)},scale='min(1600,iw)':-2",
-             "-c:v","libx264","-preset","fast","-c:a","aac","-b:a","96k","-af",audio_filters,
+             *encoder_args(preset="fast"),"-c:a","aac","-b:a","96k","-af",audio_filters,
              "-b:v",str(bitrate),"-maxrate",str(bitrate),"-bufsize",str(bitrate*2),"-pix_fmt","yuv420p",
              "-movflags","+faststart","-progress","pipe:1",str(output)]
     error_log=tempfile.TemporaryFile()

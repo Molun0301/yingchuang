@@ -1,6 +1,12 @@
 // 仅在隔离的脚本解释器内部运行；不提供文件、网络或系统调用。
+// 同一解释器会按不同时刻多次求值，每次都从原始 Date 派生。
+const OriginalDate=Date;
 function resolveScene(input) {
   const scene=input.scene,definitions=input.properties||{},errors=[];
+  // 指定 now 时按该时刻运行脚本（用于一天内各时段采样）；new Date() 与 Date.now() 都返回这一时刻。
+  globalThis.Date=OriginalDate;
+  if(typeof input.now==='number'){const RealDate=OriginalDate,fixed=input.now;globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[fixed]));}static now(){return fixed;}};}
+  const clock=new Date();
   class Vec2 {
     constructor(x=0,y=x){if(x&&typeof x==='object'){this.x=Number(x.x??x[0]??0);this.y=Number(x.y??x[1]??0);}else{this.x=Number(x);this.y=Number(y);}}
     copy(){return new this.constructor(this);}
@@ -35,7 +41,8 @@ function resolveScene(input) {
   const shared={},stored={};
   const localStorage={get:key=>stored[key],set:(key,value)=>{stored[key]=value;},remove:key=>delete stored[key]};
   const properties=Object.fromEntries(Object.entries(definitions).map(([key,p])=>[key,unpack(p.value,p.type==='color'?'color':'text')]));
-  const engine={userProperties:properties,runtime:0,frametime:1/60,isMobile:false,screenResolution:new Vec2(input.width,input.height),canvasSize:new Vec2(input.width,input.height),language:'zh-cn'};
+  const engine={userProperties:properties,runtime:0,frametime:1/60,isMobile:false,screenResolution:new Vec2(input.width,input.height),canvasSize:new Vec2(input.width,input.height),language:'zh-cn',
+    timeOfDay:(clock.getHours()*3600+clock.getMinutes()*60+clock.getSeconds())/86400};
   const mouse={cursorPosition:new Vec2(input.width/2,input.height/2),cursorWorldPosition:new Vec3(input.width/2,input.height/2,0)};
   const inputState=mouse;
   const layers=new Map(),dirty=new Map();
@@ -48,6 +55,8 @@ function resolveScene(input) {
     }
     Object.defineProperty(layer,'getParent',{value:()=>layers.get(raw.parent)||null});
     Object.defineProperty(layer,'getTextureAnimation',{value:()=>({play(){},stop(){},pause(){},setFrame(){},getFrame(){return 0;}})});
+    // 视频纹理的播放控制只影响桌面播放，这里只需让脚本继续执行到可见性等字段的赋值。
+    Object.defineProperty(layer,'getVideoTexture',{value:()=>({play(){},stop(){},pause(){},setCurrentTime(){},getCurrentTime(){return 0;},getDuration(){return 0;},isPlaying(){return true;}})});
     layers.set(raw.id,layer);
   }
   const thisScene={getLayer:key=>typeof key==='number'?layers.get(key):[...layers.values()].find(l=>l.name===key),getLayers:()=>[...layers.values()],getLayerCount:()=>layers.size,canvasSize:new Vec2(input.width,input.height)};
