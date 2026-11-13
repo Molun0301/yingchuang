@@ -1,4 +1,4 @@
-// 在实际 Electron 窗口中检查小窗口、缩放、下拉和时间编辑。
+// 在实际 Electron 窗口中检查小窗口、缩放、下拉和组件编辑。
 const {_electron:electron}=require('playwright');
 const fs=require('node:fs');
 const path=require('node:path');
@@ -20,7 +20,7 @@ const {Store}=require('../desktop/store.cjs');
     await page.locator('.card-picture').click();
     // 默认图层模式预览不依赖 WebGL2；录制模式另由导出流程验证。
     await page.locator('canvas[data-scene-ready=true]').waitFor();
-    await page.locator('.inspector-tabs').getByRole('tab',{name:'时间',exact:true}).click();
+    await page.locator('.inspector-tabs').getByRole('tab',{name:'组件',exact:true}).click();
     await page.getByRole('combobox',{name:'时间格式'}).click();await page.getByRole('option',{name:'12 小时',exact:true}).click();
     assert.match(await page.getByRole('combobox',{name:'时间格式'}).innerText(),/12 小时/);
     await page.locator('.inspector-tabs').getByRole('tab',{name:'主题',exact:true}).click();
@@ -34,7 +34,7 @@ const {Store}=require('../desktop/store.cjs');
       await app.evaluate(({BrowserWindow},size)=>BrowserWindow.getAllWindows()[0].setSize(...size),[width,height]);
       await page.waitForFunction(size=>innerWidth===size[0]&&innerHeight===size[1],[width,height]);
       await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-      await page.locator('.inspector-tabs').getByRole('tab',{name:'时间',exact:true}).click();await page.getByRole('combobox',{name:'时间字体'}).click();
+      await page.locator('.inspector-tabs').getByRole('tab',{name:'组件',exact:true}).click();await page.getByRole('combobox',{name:'时间字体'}).click();
       const box=await page.locator('.select-popup').boundingBox();
       assert(box.x>=0&&box.y>=0&&box.x+box.width<=width+1&&box.y+box.height<=height+1);
       await page.screenshot({path:path.join(output,`${width}x${height}.png`)});
@@ -45,6 +45,6 @@ const {Store}=require('../desktop/store.cjs');
     assert.deepEqual(errors,[]);
     const graphics=await app.evaluate(({app})=>app.getGPUFeatureStatus());
     fs.writeFileSync(path.join(output,'结果.json'),JSON.stringify({platform:process.platform,scale:1.5,graphics,measurements,errors},null,2));
-    console.log('窗口、菜单、时间和滚轮检查通过');
+    console.log('窗口、菜单、组件和滚轮检查通过');
   }finally{await app.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

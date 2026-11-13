@@ -14,6 +14,8 @@ const { evaluateScene, sceneEvaluator, scriptInput } = require('./scenescript.cj
 const { installRecorderHandlers, record, bake } = require('./recorder.cjs');
 const { frameScene, recordSize } = require('./framing.cjs');
 const { planTimeVariants, localMinute } = require('./timevariants.cjs');
+const { installUpdater } = require('./updater.cjs');
+const { lunar } = require(app.isPackaged ? path.join(process.resourcesPath,'core','组件绘制.cjs') : path.join(__dirname,'../core','组件绘制.cjs'));
 const devices = require('./devices.json');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'yingchuang', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }]);
@@ -187,7 +189,7 @@ async function runWorker(input, signal, onProgress = () => {}) {
         else resolve(result);
       });
       child.stdin.on('error',()=>{});
-      child.stdin.end(JSON.stringify({ ...input,cacheRoot,scratchRoot,exportStagingRoot })+'\n');
+      child.stdin.end(JSON.stringify({ ...input,...(['preview','motion-preview','clock','export'].includes(input.operation)?{widgetSamples:lunar(new Date())}:{}),cacheRoot,scratchRoot,exportStagingRoot })+'\n');
       if (signal?.aborted) abort();
     });
   } finally {
@@ -270,10 +272,11 @@ async function recordTheme(input,signal,progress) {
   const full={width:Math.ceil(sceneWidth*framing.scale),height:Math.ceil(sceneHeight*framing.scale)};
   const crop={...size,x:Math.round(-device.width*framing.marginX-framing.left),y:Math.round(-device.height*framing.marginY-framing.top)};
   crop.x=Math.max(0,Math.min(crop.x,full.width-crop.width));crop.y=Math.max(0,Math.min(crop.y,full.height-crop.height));
+  if(draft.layout.flip)crop.x=full.width-crop.x-crop.width;
   const fade=settings.loop?Math.round(settings.fade*settings.fps):0;
   const job={theme:liveTheme(theme),properties:draft.properties,patch:await livePatch(theme,draft),playing:true,dpr:1,
     mode:theme.type==='scene'?'step':'realtime',fps:settings.fps,frames:Math.round(settings.duration*settings.fps)+fade,fade,
-    warmup:Math.round(2*settings.fps),sceneWidth,sceneHeight,full,crop};
+    warmup:Math.round(2*settings.fps),sceneWidth,sceneHeight,full,crop,flip:draft.layout.flip};
   ffmpegPath ||= (await worker({operation:'ffmpeg'})).path;
   const output=path.join(app.getPath('userData'),'jobs','record-'+randomUUID()+'.mp4');
   progress({phase:'载入完整画面',progress:6});
@@ -389,7 +392,8 @@ async function recordApplication(input,signal,progress) {
     }
     const fade=settings.loop?Math.round(settings.fade*settings.fps):0;
     const job={theme:liveTheme(theme),properties:{},patch:{hidden:[],layers:{},fonts:{}},playing:true,dpr:1,mode:'capture',sourceId:source.id,
-      layout:draft.layout,margin:{x:framing.marginX,y:framing.marginY},fps:settings.fps,frames:Math.round(settings.duration*settings.fps)+fade,fade,
+      // 采集页按实际窗口尺寸求裁切，反向取景等价于 full.width - crop.x - crop.width。
+      layout:{...draft.layout,x:draft.layout.flip?1-draft.layout.x:draft.layout.x},flip:draft.layout.flip,margin:{x:framing.marginX,y:framing.marginY},fps:settings.fps,frames:Math.round(settings.duration*settings.fps)+fade,fade,
       warmup:Math.round(3*settings.fps),sceneWidth:16,sceneHeight:9,full:size,crop:{...size,x:0,y:0}};
     ffmpegPath ||= (await worker({operation:'ffmpeg'})).path;
     const output=path.join(app.getPath('userData'),'jobs','record-'+randomUUID()+'.mp4');
@@ -399,7 +403,12 @@ async function recordApplication(input,signal,progress) {
 }
 async function draftFor(theme) {
   const saved = store.data.drafts[theme.id];
-  if (saved) return structuredClone(saved);
+  if (saved) {
+    const draft=structuredClone(saved),defaults=defaultDraft();
+    draft.layout=cleanLayout(draft.layout);
+    draft.appearance={fonts:{...defaults.appearance.fonts,...draft.appearance.fonts},colors:{...defaults.appearance.colors,...draft.appearance.colors}};
+    return draft;
+  }
   const detail = await inspect(theme);
   return defaultDraft(theme.propertyValues,detail.hasClock,store.data.settings.deviceId);
 }
@@ -435,6 +444,7 @@ function handle(name,callback) {
 
 async function setup() {
   store = new Store(app.getPath('userData'));
+  installUpdater({ store, handle, notify });
   if (!store.data.settings.outputDirectory) {
     store.data.settings.outputDirectory = path.join(app.getPath('documents'),'映窗导出');
     store.save();

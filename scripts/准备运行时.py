@@ -39,7 +39,8 @@ def linux_runtime():
           '--distpath',str(work/'dist'),'--workpath',str(work/'work'),'--specpath',str(work),
           '--paths',str(ROOT/'core'),'--collect-submodules','fontTools.ttLib.tables','--additional-hooks-dir',str(hooks),
           '--exclude-module','tkinter','--exclude-module','pytest','--exclude-module','IPython',
-          '--add-data',str(ROOT/'core/预览模板.html')+':.',str(ROOT/'core/应用桥接.py')]
+          '--add-data',str(ROOT/'core/预览模板.html')+':.',
+          '--add-data',str(ROOT/'core/组件.json')+':.',str(ROOT/'core/应用桥接.py')]
     with (ROOT/'build/转换运行时.log').open('w') as log:subprocess.check_call(args,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
     if destination.exists():shutil.rmtree(destination)
     shutil.copytree(work/'dist/converter-worker',destination)

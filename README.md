@@ -6,7 +6,7 @@
 
 **把 Wallpaper Engine 壁纸搬上小米背屏**
 
-完整特效 · 逐层视差 · 随时段变化 · 一键导出
+完整特效 · 逐层视差 · 背屏组件 · 一键导出
 
 [![版本](https://img.shields.io/github/v/release/Molun0301/yingchuang?label=%E7%89%88%E6%9C%AC&color=4f8cff)](https://github.com/Molun0301/yingchuang/releases/latest)
 ![平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20Linux-7a6cff)
@@ -27,10 +27,12 @@
 | 🎬 **完整特效** | 编辑器用 WebGL（网页图形接口）实时渲染壁纸的特效、粒子与脚本，预览即电脑上的效果 |
 | 🧩 **逐层视差** | 图层逐个烘焙特效后分层导出，背屏上每层独立随手机倾斜 |
 | 🌗 **随时段变化** | 晨昏昼夜切换的壁纸导出后照样按系统时间切换，渐变时段保留过渡 |
-| 🕒 **时钟排版** | 星期、日期、时间的字体、字号、颜色和位置自由调整，可存为模板批量套用 |
+| 🕒 **背屏组件** | 时间、农历、步数、天气、电量等 20 个组件，字体、字号、颜色和位置自由调整，可存为模板批量套用 |
+| 📷 **真机镜头** | 预览按机型画出镜头的实际位置；主体被挡住时可水平翻转画面 |
 | 📦 **自动压缩** | 按背屏实际分辨率裁切缩小 2K/4K 素材，包体通常缩小一半以上 |
 | ⚡ **硬件加速** | 多窗口并行渲染图层，视频优先使用显卡硬件编码（NVENC / QSV / AMF） |
 | 🪟 **玻璃界面** | 磨砂玻璃、液态玻璃两种材质，浅色、深色或跟随系统 |
+| 🔄 **在线更新** | 启动时检查新版本，下载校验后自动安装 |
 
 <table>
   <tr>
@@ -57,15 +59,15 @@
 
 | 系统 | 下载 | 使用方式 |
 | --- | --- | --- |
-| Windows 10/11 x64 | [映窗 0.2.0 免安装包](https://github.com/Molun0301/yingchuang/releases/download/v0.2.0/yingchuang-0.2.0-Windows-x64.zip) | 完整解压后打开“映窗.exe” |
-| Linux x86_64 | [映窗 0.2.0 AppImage](https://github.com/Molun0301/yingchuang/releases/download/v0.2.0/yingchuang-0.2.0-Linux-x86_64.AppImage) | 赋予执行权限后运行 |
+| Windows 10/11 x64 | [映窗 0.3.0 免安装包](https://github.com/Molun0301/yingchuang/releases/download/v0.3.0/yingchuang-0.3.0-Windows-x64.zip) | 完整解压后打开“映窗.exe” |
+| Linux x86_64 | [映窗 0.3.0 AppImage](https://github.com/Molun0301/yingchuang/releases/download/v0.3.0/yingchuang-0.3.0-Linux-x86_64.AppImage) | 赋予执行权限后运行 |
 
-安装包已包含转换运行时与 FFmpeg，无需另装 Python。[全部版本](https://github.com/Molun0301/yingchuang/releases) · [0.2.0 版本说明](docs/公开文档/版本说明-0.2.0.md)
+安装包已包含转换运行时与 FFmpeg，无需另装 Python。[全部版本](https://github.com/Molun0301/yingchuang/releases) · [0.3.0 版本说明](docs/公开文档/版本说明-0.3.0.md)
 
 ## 三步上手
 
 1. 打开映窗，自动读取 Steam 中的 Wallpaper Engine 壁纸，也可以手动添加目录。
-2. 点开壁纸，选择机型，调整取景、时钟和主题设置。
+2. 点开壁纸，选择机型，调整取景、组件和主题设置。
 3. 点击“转换壁纸”，得到 `.mrc` 背屏主题包，按 [背屏导入指南](docs/公开文档/背屏导入指南.md) 放到手机上。未 root、Shizuku 授权和已 root 三种方式都有说明。
 
 支持机型：小米 17 Pro、17 Pro Max、18 Pro、18 Pro Max。
@@ -103,6 +105,12 @@ AppImage 需要 FUSE 2。Ubuntu 24.04 及以上运行 `sudo apt install libfuse2
 <summary>手机上的效果实测过吗？</summary>
 
 桌面端的转换、预览和打包已经过测试，手机导入、背屏运行和时段切换还没有在全部机型上实测。遇到问题欢迎提交 [Issue](https://github.com/Molun0301/yingchuang/issues)。
+</details>
+
+<details>
+<summary>步数、天气组件在手机上显示为 0？</summary>
+
+这些数据由手机系统提供：步数类组件需要安装小米健康，天气类组件需要安装小米天气并允许定位。电脑预览显示的是示例数据。
 </details>
 
 <details>

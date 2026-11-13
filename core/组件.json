@@ -1,0 +1,61 @@
+{
+  "说明": "背屏组件定义。fields 为数据字段：maml 是背屏端表达式，sample 是电脑预览用的示例值；widgets 的 format 为带单位或标签的显示格式，bare 为只显示数值的格式。数据来源见 docs 开发文档 19背屏组件。",
+  "categories": [
+    { "key": "time", "name": "时间日期" },
+    { "key": "health", "name": "运动健康" },
+    { "key": "weather", "name": "天气" },
+    { "key": "phone", "name": "手机状态" },
+    { "key": "custom", "name": "文字" }
+  ],
+  "sources": {
+    "health": { "name": "小米健康", "note": "数据来自小米健康，预览为示例数据" },
+    "weather": { "name": "小米天气", "note": "数据来自小米天气，预览为示例数据" },
+    "phone": { "name": "系统", "note": "数据来自系统，预览为示例数据" }
+  },
+  "fields": {
+    "lm": { "maml": "#month_lunar+12*#month_lunar_leap", "choices": ["正月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "冬月", "腊月", "闰正月", "闰二月", "闰三月", "闰四月", "闰五月", "闰六月", "闰七月", "闰八月", "闰九月", "闰十月", "闰冬月", "闰腊月"] },
+    "ld": { "maml": "#date_lunar-1", "choices": ["初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十", "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"] },
+    "steps": { "source": "health", "maml": "num(@MiSteps_steps)", "sample": 6542, "max": 6 },
+    "dist": { "source": "health", "maml": "num(@MiSteps_distance)", "sample": 4.36, "max": 3 },
+    "kcal": { "source": "health", "maml": "num(@MiSteps_energy)", "sample": 238, "max": 5 },
+    "active": { "source": "health", "maml": "num(@MiSteps_strength_duration)", "sample": 32, "max": 4 },
+    "goal": { "source": "health", "maml": "ifelse(gt(num(@MiSteps_goal),0),int(num(@MiSteps_steps)*100/num(@MiSteps_goal)),0)", "sample": 82, "max": 3 },
+    "bat": { "source": "phone", "maml": "#battery_level", "sample": 86, "max": 3 },
+    "sms": { "source": "phone", "maml": "#sms_unread_count", "sample": 2, "max": 3 },
+    "calls": { "source": "phone", "maml": "#call_missed_count", "sample": 1, "max": 3 },
+    "temp": { "source": "weather", "maml": "#weather_temperature", "sample": 18, "max": 2, "neg": true },
+    "tmax": { "source": "weather", "maml": "num(@yc_tmax)", "sample": 21, "max": 2, "neg": true },
+    "tmin": { "source": "weather", "maml": "num(@yc_tmin)", "sample": 12, "max": 2, "neg": true },
+    "hum": { "source": "weather", "maml": "#weather_humidity", "sample": 64, "max": 3 },
+    "riseH": { "source": "weather", "maml": "num(@yc_rise_h)", "sample": 6, "max": 2 },
+    "riseM": { "source": "weather", "maml": "num(@yc_rise_m)", "sample": 42, "max": 2 },
+    "setH": { "source": "weather", "maml": "num(@yc_set_h)", "sample": 17, "max": 2 },
+    "setM": { "source": "weather", "maml": "num(@yc_set_m)", "sample": 8, "max": 2 },
+    "wx": { "source": "weather", "maml": "ifelse(ge(#weather_id,0)*le(#weather_id,25),#weather_id,26)", "sample": 1,
+      "choices": ["晴", "多云", "阴", "雾", "特大暴雨", "大暴雨", "暴雨", "雷阵雨", "阵雨", "大雨", "中雨", "小雨", "雨夹雪", "暴雪", "阵雪", "大雪", "中雪", "小雪", "强沙尘暴", "沙尘暴", "沙尘", "扬沙", "冰雹", "浮尘", "霾", "冻雨", "--"] },
+    "air": { "source": "weather", "maml": "ifelse(le(#weather_aqi,50),0,le(#weather_aqi,100),1,le(#weather_aqi,150),2,le(#weather_aqi,200),3,le(#weather_aqi,300),4,5)", "sample": 0,
+      "choices": ["优", "良", "轻度污染", "中度污染", "重度污染", "严重污染"] }
+  },
+  "widgets": [
+    { "key": "time", "name": "时间", "category": "time", "core": true, "sample": "10:08", "x": 0.74, "y": 0.62, "size": 69, "align": "center" },
+    { "key": "date", "name": "日期", "category": "time", "core": true, "sample": "2026.11.13", "x": 0.74, "y": 0.47, "size": 34, "align": "center" },
+    { "key": "week", "name": "星期", "category": "time", "core": true, "sample": "FRIDAY", "x": 0.74, "y": 0.36, "size": 43, "align": "center" },
+    { "key": "lunar", "name": "农历", "category": "time", "format": "{lm}{ld}", "bare": "{lm}{ld}", "sample": "十月廿四", "x": 0.74, "y": 0.72, "size": 26, "align": "center" },
+    { "key": "steps", "name": "步数", "category": "health", "format": "{steps} 步", "bare": "{steps}", "sample": "6542 步", "x": 0.43, "y": 0.86, "size": 24, "align": "center" },
+    { "key": "distance", "name": "运动距离", "category": "health", "format": "{dist.2} 公里", "bare": "{dist.2}", "sample": "4.36 公里", "x": 0.63, "y": 0.86, "size": 24, "align": "center" },
+    { "key": "calories", "name": "消耗热量", "category": "health", "format": "{kcal} 千卡", "bare": "{kcal}", "sample": "238 千卡", "x": 0.83, "y": 0.86, "size": 24, "align": "center" },
+    { "key": "active", "name": "中高强度运动", "category": "health", "format": "运动 {active} 分钟", "bare": "{active}", "sample": "运动 32 分钟", "x": 0.58, "y": 0.79, "size": 22, "align": "center" },
+    { "key": "goal", "name": "步数目标", "category": "health", "format": "目标 {goal}%", "bare": "{goal}%", "sample": "目标 82%", "x": 0.85, "y": 0.79, "size": 22, "align": "center" },
+    { "key": "weather", "name": "天气", "category": "weather", "format": "{wx}", "bare": "{wx}", "sample": "多云", "x": 0.42, "y": 0.15, "size": 26, "align": "center" },
+    { "key": "temperature", "name": "气温", "category": "weather", "format": "{temp}°", "bare": "{temp}", "sample": "18°", "x": 0.55, "y": 0.15, "size": 26, "align": "center" },
+    { "key": "range", "name": "今日温度", "category": "weather", "format": "{tmin}° / {tmax}°", "bare": "{tmin}~{tmax}", "sample": "12° / 21°", "x": 0.7, "y": 0.15, "size": 22, "align": "center" },
+    { "key": "humidity", "name": "湿度", "category": "weather", "format": "湿度 {hum}%", "bare": "{hum}%", "sample": "湿度 64%", "x": 0.42, "y": 0.24, "size": 20, "align": "center" },
+    { "key": "air", "name": "空气质量", "category": "weather", "format": "空气{air}", "bare": "{air}", "sample": "空气优", "x": 0.56, "y": 0.24, "size": 20, "align": "center" },
+    { "key": "sunrise", "name": "日出", "category": "weather", "format": "日出 {riseH:2}:{riseM:2}", "bare": "{riseH:2}:{riseM:2}", "sample": "日出 06:42", "x": 0.7, "y": 0.24, "size": 20, "align": "center" },
+    { "key": "sunset", "name": "日落", "category": "weather", "format": "日落 {setH:2}:{setM:2}", "bare": "{setH:2}:{setM:2}", "sample": "日落 17:08", "x": 0.85, "y": 0.24, "size": 20, "align": "center" },
+    { "key": "battery", "name": "电量", "category": "phone", "format": "电量 {bat}%", "bare": "{bat}%", "sample": "电量 86%", "x": 0.85, "y": 0.15, "size": 22, "align": "center" },
+    { "key": "sms", "name": "未读短信", "category": "phone", "format": "短信 {sms}", "bare": "{sms}", "sample": "短信 2", "x": 0.4, "y": 0.79, "size": 20, "align": "center" },
+    { "key": "calls", "name": "未接来电", "category": "phone", "format": "未接 {calls}", "bare": "{calls}", "sample": "未接 1", "x": 0.74, "y": 0.79, "size": 20, "align": "center" },
+    { "key": "text", "name": "自定义文字", "category": "custom", "sample": "今天也要开心", "x": 0.45, "y": 0.72, "size": 24, "align": "center" }
+  ]
+}

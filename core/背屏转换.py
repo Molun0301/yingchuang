@@ -567,6 +567,66 @@ def clock_geometry(config, layout, width, height):
     return center, height/2, unit
 
 
+def add_widget(line,row):
+    """逐片段计算实际宽度，数字位数变化时整行仍按所选方向对齐。"""
+    from 背屏时钟 import FIELDS
+    widths,parts=[],[]
+    for index,seg in enumerate(row["segments"]):
+        prefix=f"yc_{row['key']}_{index}"
+        def var(suffix,expression):
+            name=prefix+"_"+suffix
+            element(line,"Var",name=name,expression=expression)
+            return "#"+name
+        if seg["t"]=="s":
+            width=number(seg["w"]);parts.append((seg,None,None))
+        elif seg["t"]=="c":
+            choice=var("c",f"int(max(0,min({len(seg['assets'])-1},{FIELDS[seg['f']]['maml']})))")
+            choices=",".join(f"eq({choice},{i}),{number(w)}" for i,w in enumerate(seg["ws"][:-1]))
+            width=var("w",f"ifelse({choices},{number(seg['ws'][-1])})")
+            parts.append((seg,choice,None))
+        else:
+            dec,pad,maximum=seg["dec"],seg["pad"],seg["max"]
+            value=var("v",FIELDS[seg["f"]]["maml"])
+            units=var("u",f"int(abs({value})*{10**dec}+0.5)")
+            whole=var("i",f"int({units}/{10**dec})")
+            digits=",".join(f"ge({whole},{10**r}),{r+1}" for r in range(maximum-1,0,-1))
+            count=var("n",f"max({pad},ifelse({digits},1))" if digits else str(pad))
+            negative=var("neg",f"lt({value},0)" if seg["neg"] else "0")
+            width=var("w",f"({count}+{dec})*{row['digitW']}"+
+                      (f"+{row['dot']['w']}" if dec else "")+
+                      (f"+{negative}*{row['minus']['w']}" if seg["neg"] else ""))
+            parts.append((seg,(units,whole,count,negative),None))
+        widths.append(width)
+    total=f"yc_{row['key']}_W"
+    element(line,"Var",name=total,expression="+".join(widths))
+    edge="0" if row.get("align")=="left" else f"-#{total}" if row.get("align")=="right" else f"-#{total}/2"
+    align={"h":f"{row['h']}*#clock_unit","align":"center","alignV":"center","antiAlias":"true"}
+    def image(src,x,w,**attrs):
+        element(line,"Image",src=src,x=f"({x})*#clock_unit",y="0",w=f"({w})*#clock_unit",**align,**attrs)
+    for (seg,variables,_),width in zip(parts,widths):
+        if seg["t"]=="s":image(seg["asset"],f"{edge}+{width}/2",width)
+        elif seg["t"]=="c":image(seg["src"],f"{edge}+{width}/2",width,srcid=variables)
+        else:
+            units,whole,count,negative=variables
+            start=edge
+            if seg["neg"]:
+                minus=row["minus"]
+                image(minus["asset"],f"{start}+{minus['w']}/2",str(minus["w"]),visibility=negative)
+                start+=f"+{negative}*{minus['w']}"
+            src=row["digits"][0].rsplit("_",1)[0]+".png"
+            dw=row["digitW"]
+            for r in range(seg["max"]-1,-1,-1):
+                image(src,f"{start}+({count}-{r}-0.5)*{dw}",str(dw),
+                      srcid=f"int({whole}/{10**r})%10",visibility=f"gt({count},{r})")
+            if seg["dec"]:
+                dot=row["dot"]
+                image(dot["asset"],f"{start}+{count}*{dw}+{dot['w']}/2",str(dot["w"]))
+                for r in range(seg["dec"]):
+                    image(src,f"{start}+{count}*{dw}+{dot['w']}+{number(r+.5)}*{dw}",str(dw),
+                          srcid=f"int({units}/{10**(seg['dec']-r-1)})%10")
+        edge+=f"+{width}"
+
+
 def add_clock(root, layout, config):
     from 背屏时钟 import digit_expression
     if config.get("时钟排版"):
@@ -575,9 +635,13 @@ def add_clock(root, layout, config):
             if row.get("visible") is False: continue
             key = row["key"]
             x = f"#view_width*{number(row['nx'])}"
-            if row.get("align") == "left": x += f"+{number(row['w']/2)}*#clock_unit"
-            elif row.get("align") == "right": x += f"-{number(row['w']/2)}*#clock_unit"
+            if "segments" not in row:
+                if row.get("align") == "left": x += f"+{number(row['w']/2)}*#clock_unit"
+                elif row.get("align") == "right": x += f"-{number(row['w']/2)}*#clock_unit"
             line = element(root, "Group", name=f"clock_{key}", x=x, y=f"#view_height*{number(row['ny'])}")
+            if "segments" in row:
+                add_widget(line,row)
+                continue
             align = {"h": f"{row['h']}*#clock_unit", "align": "center", "alignV": "center", "antiAlias": "true"}
             if key == "week":
                 element(line, "Image", x="0", y="0", w=f"{row['w']}*#clock_unit",src="assets/clock_week.png",srcid="max(0,min(6,#day_of_week-1))",**align)
@@ -614,9 +678,35 @@ def add_clock(root, layout, config):
 
 
 def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
+    from 背屏时钟 import FIELDS
+    fields={seg["f"] for row in (clock or {}).get("rows",[]) if row.get("visible") is not False
+            for seg in row.get("segments",[]) if "f" in seg}
+    sources={FIELDS[field].get("source") for field in fields}
     root = ET.Element("Widget", version="2", screenWidth=str(int(c.get("预览宽度",1080))), scaleByDensity="false",
-                      frameRate=str(int(c["帧率"])), useVariableUpdater="DateTime.Second" if c["显示秒"] else "DateTime.Minute")
+                      frameRate=str(int(c["帧率"])), useVariableUpdater=("Battery," if "bat" in fields else "")+("DateTime.Second" if c["显示秒"] else "DateTime.Minute"))
     binders = element(root, "VariableBinders")
+    providers=[]
+    if "health" in sources:
+        columns="steps,goal,distance,energy,strength_duration,summary"
+        binder=element(binders,"ContentProviderBinder",name="MiSteps",uri="content://com.mi.health.provider.main/activity/steps/brief",
+                       columns=columns,countName="hasSteps")
+        for column in columns.split(","):element(binder,"Variable",name="MiSteps_"+column,type="string",column=column)
+        providers.append("MiSteps")
+        watch=element(element(root,"Var",name="yc_minute_watch",expression="#minute",threshold="1"),"Trigger")
+        element(watch,"BinderCommand",name="MiSteps",command="refresh")
+    if "weather" in sources:
+        binder=element(binders,"ContentProviderBinder",name="WeatherProvider",uri="content://weather/actualWeatherData/1",
+                       columns="weather_type,temperature,humidity,aqilevel,sunrise,sunset,tmphighs,tmplows",countName="hasweather")
+        for name,column,kind in (("id","weather_type","int"),("temperature","temperature","int"),("humidity","humidity","int"),
+                                  ("aqi","aqilevel","int"),("sunrise","sunrise","int"),("sunset","sunset","int"),
+                                  ("temphigh","tmphighs","string[]"),("templow","tmplows","string[]")):
+            element(binder,"Variable",name="weather_"+name,type=kind,column=column)
+        trigger=element(binder,"Trigger")
+        for name,expression in (("tmax","@weather_temphigh[0]"),("tmin","@weather_templow[0]"),
+                                ("rise_h","formatDate('H',#weather_sunrise)"),("rise_m","formatDate('m',#weather_sunrise)"),
+                                ("set_h","formatDate('H',#weather_sunset)"),("set_m","formatDate('m',#weather_sunset)")):
+            element(trigger,"VariableCommand",name="yc_"+name,type="string",expression=expression)
+        providers.append("WeatherProvider")
     sensor = element(binders, "SensorBinder", type="gravity", rate="1")
     for axis, index in (("x", 0), ("y", 1)):
         element(sensor, "Variable", name="g_" + axis, index=index)
@@ -684,12 +774,14 @@ def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
         element(bt, "VariableCommand", name="smooth_" + axis, expression="0")
     element(bt, "VariableCommand", name="motion_ready", expression="1")
     external = element(root, "ExternalCommands")
-    if has_video:
+    if has_video or providers:
         init=element(external,"Trigger",action="init")
+        for name in providers:element(init,"BinderCommand",name=name,command="refresh")
         for layer in layers:
             if layer.get("video"):
                 element(init,"VideoCommand",target="video_"+str(layer["id"]),command="config",path="'"+layer["video"]+"'",loop="1",scaleMode="2")
     resume = element(external, "Trigger", action="resume")
+    for name in providers:element(resume,"BinderCommand",name=name,command="refresh")
     element(resume, "VariableCommand", name="motion_ready", expression="0")
     for axis in ("x", "y"):
         element(resume, "VariableCommand", name="smooth_" + axis, expression="0")
@@ -741,7 +833,7 @@ def still_preview(sw, sh, layers, c, clock=None, stage=None, background="#061633
     if clock is not None:
         from 背屏时钟 import draw_clock
         x, y, unit = clock_geometry(c, clock, w, h)
-        draw_clock(canvas, stage, clock, x, y, unit)
+        draw_clock(canvas, stage, clock, x, y, unit,c.get("组件示例"))
     return canvas.convert("RGB")
 
 
@@ -850,7 +942,9 @@ def write_product(stage, sw, sh, layers, config, name, restored, notes, details,
              "restored":restored,"layers":clean_layers,"background":background}
     template=(ROOT/"预览模板.html").read_text(encoding="utf-8")
     encoded=json.dumps(payload,ensure_ascii=False,allow_nan=False).replace("<","\\u003c")
-    (stage/"交互预览.html").write_text(template.replace("__SCENE_DATA__",encoded),encoding="utf-8")
+    widgets=(ROOT/"组件绘制.cjs").read_text(encoding="utf-8")
+    (stage/"交互预览.html").write_text(template.replace("__WIDGET_DRAW__",widgets).replace("__SCENE_DATA__",encoded),encoding="utf-8")
+    notes=[*notes,*[warning["message"] for warning in (clock or {}).get("warnings",[])]]
     report={"壁纸":name,"输入类型":source_type,"结果":"已生成，未做手机验收","图层数量":len(layers),
             "恢复效果":restored,"效果详情":details,"未迁移及注意事项":list(dict.fromkeys(notes)),
             "目标":"小米 18 Pro Max，RearEye 导入包","时钟":"按编辑器排版" if clock else "未添加",

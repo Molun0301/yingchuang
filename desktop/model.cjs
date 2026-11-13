@@ -1,14 +1,13 @@
 const { randomUUID } = require('node:crypto');
+const path = require('node:path');
 
-const ROWS = ['week', 'date', 'time'];
+const { widgets } = require(process.versions.electron && !process.defaultApp ? path.join(process.resourcesPath,'core','组件.json') : path.join(__dirname,'../core','组件.json'));
+const ROWS = widgets.map(widget => widget.key);
 const DEFAULT_LAYOUT = {
-  scale: 1.06, x: 0.5, y: 0.5,
+  scale: 1.06, x: 0.5, y: 0.5, flip: false,
   clock: { enabled: true, language: 'en', format: 'auto', seconds: false,
-    rows: {
-      week: { visible: true, x: 0.74, y: 0.36, size: 43, align: 'center' },
-      date: { visible: true, x: 0.74, y: 0.47, size: 34, align: 'center' },
-      time: { visible: true, x: 0.74, y: 0.62, size: 69, align: 'center' },
-    } },
+    rows: Object.fromEntries(widgets.map(({key,core,x,y,size,align,sample}) => [key,
+      { visible: Boolean(core), x, y, size, align, label: true, ...(key === 'text' ? {text:sample} : {}) }])) },
 };
 const clone = value => structuredClone(value);
 // 导出方式：layers 图层模式（默认）、record 录制模式；后几项是录制时长（秒）、帧率、首尾交叉淡化（秒）。
@@ -27,6 +26,7 @@ function cleanLayout(input = {}) {
   layout.scale = bounded(input.scale, layout.scale, 0.2, 5);
   layout.x = bounded(input.x, layout.x, 0, 1);
   layout.y = bounded(input.y, layout.y, 0, 1);
+  layout.flip = input.flip ?? layout.flip;
   const clock = input.clock || {};
   if (typeof clock.enabled === 'boolean') layout.clock.enabled = clock.enabled;
   if (['en', 'zh'].includes(clock.language)) layout.clock.language = clock.language;
@@ -39,23 +39,25 @@ function cleanLayout(input = {}) {
     target.y = bounded(row.y, target.y, 0, 1);
     target.size = bounded(row.size, target.size, 10, 180);
     if (typeof row.visible === 'boolean') target.visible = row.visible;
+    target.label = row.label ?? target.label;
+    if (key === 'text') target.text = [...(row.text ?? target.text)].slice(0, 40).join('');
     if (['left', 'center', 'right'].includes(row.align)) target.align = row.align;
   }
   return layout;
 }
 
 function templateLayout(layout) {
-  // 模板只携带排版；语言、时间格式和主题内容仍各自保留。
+  // 模板只套用排版；language 仅供缩略图示意，草稿语言、时间格式和主题内容仍各自保留。
   const normalized = cleanLayout(layout);
   const rows = Object.fromEntries(ROWS.map(key => [key, { ...normalized.clock.rows[key] }]));
-  return { scale: normalized.scale, x: normalized.x, y: normalized.y, clockEnabled:normalized.clock.enabled, rows };
+  return { scale: normalized.scale, x: normalized.x, y: normalized.y, clockEnabled:normalized.clock.enabled, language:normalized.clock.language, rows };
 }
 
 function applyTemplate(draft, template) {
   const result = clone(draft);
   const input = template.layout || template;
   result.layout = cleanLayout({ ...draft.layout, scale: input.scale, x: input.x, y: input.y,
-    clock: { ...draft.layout.clock, enabled:input.clockEnabled??draft.layout.clock.enabled, rows: input.rows } });
+    clock: { ...draft.layout.clock, enabled:input.clockEnabled??draft.layout.clock.enabled, rows: { ...draft.layout.clock.rows, ...input.rows } } });
   return result;
 }
 
@@ -68,7 +70,7 @@ function defaultDraft(properties = {}, hasClock = true, deviceId = 'xiaomi-18-pr
   const layout = clone(DEFAULT_LAYOUT);
   layout.clock.enabled = hasClock;
   return { version: 1, deviceId, layout,
-    appearance: { fonts: { week: '', date: '', time: '' }, colors: { week: '', date: '', time: '' } },
+    appearance: { fonts: Object.fromEntries(ROWS.map(key => [key, ''])), colors: Object.fromEntries(ROWS.map(key => [key, ''])) },
     motion: { amount: 0.02, sensitivity: 4, smoothing: 0.16, vertical: 0.3, fps: 30 },
     export: { ...DEFAULT_EXPORT }, properties: clone(properties), layers: {} };
 }

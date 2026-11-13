@@ -41,7 +41,7 @@ function selectEncoder(ffmpeg) {
   return encoderChoice;
 }
 
-async function encoder(ffmpeg, output, width, height, fps, pixelFormat) {
+async function encoder(ffmpeg, output, width, height, fps, pixelFormat, flip) {
   const name = await selectEncoder(ffmpeg);
   const quality = {
     libx264: ['-preset', 'medium', '-crf', '18'],
@@ -50,7 +50,7 @@ async function encoder(ffmpeg, output, width, height, fps, pixelFormat) {
     h264_amf: ['-rc', 'cqp', '-qp_i', '18', '-qp_p', '18', '-qp_b', '18'],
   }[name];
   const child = spawn(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', pixelFormat,
-    '-s', `${width}x${height}`, '-r', String(fps), '-i', 'pipe:0', '-an', '-c:v', name, ...quality,
+    '-s', `${width}x${height}`, '-r', String(fps), '-i', 'pipe:0', '-an', ...(flip ? ['-vf', 'hflip'] : []), '-c:v', name, ...quality,
     '-maxrate', '12M', '-bufsize', '24M', '-pix_fmt', 'yuv420p', '-g', String(fps * 2), '-movflags', '+faststart', output],
   { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
   let errors = '';
@@ -94,7 +94,7 @@ async function record({ job, output, ffmpeg, rendererUrl, signal, onProgress }) 
   await fs.mkdir(path.dirname(output), { recursive: true });
   // realtime 由主进程从离屏窗口取帧（BGRA）；step 与 capture 由页面送出 RGBA 像素。
   const realtime = job.mode === 'realtime';
-  const video = await encoder(ffmpeg, output, width, height, job.fps, realtime ? 'bgra' : 'rgba');
+  const video = await encoder(ffmpeg, output, width, height, job.fps, realtime ? 'bgra' : 'rgba', job.flip);
   const loop = new LoopWriter(video, body, fade);
   const total = body + fade;
   const window = recorderWindow(job);

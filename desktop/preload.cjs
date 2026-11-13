@@ -17,4 +17,7 @@ contextBridge.exposeInMainWorld('yingchuang',{
   openTheme:id=>invoke('open-theme',id),openOutput:id=>invoke('open-output',id),windowControl:action=>invoke('window-control',action),
   onQueue:callback=>listen('queue-change',callback),onPreviewProgress:callback=>listen('preview-progress',callback),
   onPreviewReady:callback=>listen('preview-ready',callback),
+  updateCheck:()=>invoke('update-check'),updateDownload:()=>invoke('update-download'),updateCancel:()=>invoke('update-cancel'),
+  updateInstall:()=>invoke('update-install'),updateSettings:patch=>invoke('update-settings',patch),openRelease:url=>invoke('open-release',url),
+  onUpdate:callback=>listen('update',callback),
 });

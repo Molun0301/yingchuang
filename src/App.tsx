@@ -6,6 +6,8 @@ import { Editor } from './Editor';
 import { AppearanceContext, Glass, defaultAppearance, useApplyAppearance, type Appearance } from './appearance';
 import { Ambient, FadeImage, Logo, Segmented, TypeIcon, typeNames, useNavIndicator, type ToastKind } from './ui';
 import { Toggle } from './controls';
+import widgetDefinitions from '../core/组件.json';
+import { useUpdater, UpdateBadge, UpdateDialog, UpdateSettingsSection } from './Updater';
 
 type Page = 'library' | 'favorites' | 'templates' | 'queue' | 'settings';
 
@@ -13,7 +15,7 @@ function DeviceSelect({ devices, value, onChange }: { devices: Device[]; value: 
   return <label className="device-select"><MonitorSmartphone size={16}/><Select aria-label="导出机型" value={value} onChange={e => onChange(e.target.value)}>{[...new Set(devices.map(d => d.series))].map(series => <optgroup key={series} label={series}>{devices.filter(d => d.series === series).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</optgroup>)}</Select></label>;
 }
 function TemplateThumbnail({ template }: { template: Template }) {
-  return <div className="template-thumbnail"><div className="template-phone"><div className="template-camera"><i/><i/></div>{(['week', 'date', 'time'] as const).map(key => { const row = template.layout.rows[key]; return template.layout.clockEnabled !== false && row.visible && <span key={key} style={{ left: `${row.x * 100}%`, top: `${row.y * 100}%`, fontSize: `${row.size / 6.2}px`, transform: `translate(${row.align === 'center' ? '-50%' : row.align === 'right' ? '-100%' : '0'},-50%)` }}>{key === 'week' ? 'FRIDAY' : key === 'date' ? '2026.11.06' : '10:08'}</span>; })}</div></div>;
+  return <div className="template-thumbnail"><div className="template-phone"><div className="template-camera"><i/><i/></div>{widgetDefinitions.widgets.map(widget => { const row = template.layout.rows[widget.key]; return template.layout.clockEnabled !== false && row?.visible && <span key={widget.key} style={{ left: `${row.x * 100}%`, top: `${row.y * 100}%`, fontSize: `${row.size / 6.2}px`, transform: `translate(${row.align === 'center' ? '-50%' : row.align === 'right' ? '-100%' : '0'},-50%)` }}>{widget.key === 'week' && template.layout.language === 'zh' ? '星期五' : widget.key === 'text' ? row.text ?? widget.sample : widget.sample}</span>; })}</div></div>;
 }
 function EmptyArt({ icon }: { icon: React.ReactNode }) { return <div className="empty-art"><span/><span>{icon}</span></div>; }
 
@@ -31,6 +33,7 @@ export function App() {
     setToast({ message: message.replace(/^Error invoking remote method '[^']+': Error: /, ''), kind, key: Date.now() });
     clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(null), 3400);
   };
+  const updater = useUpdater(notify);
   const merge = (value: Partial<AppState>) => setState(old => old ? { ...old, ...value } : old);
   const setAppearance = async (patch: Partial<Appearance>) => {
     const next = { ...appearance, ...patch };
@@ -97,7 +100,7 @@ export function App() {
           <button title={`配色：${schemeName[appearance.scheme]}`} aria-label={`配色：${schemeName[appearance.scheme]}，点击切换`} onClick={() => void setAppearance({ scheme: schemeNext[appearance.scheme] })}>{schemeIcon}</button>
         </div>
         <button data-nav="settings" className={`settings-nav ${page === 'settings' ? 'active' : ''}`} title="设置" onClick={() => setPage('settings')}><Settings2 size={18}/><span>设置</span></button>
-        <span className="app-version">映窗 {state.version}</span>
+        <div className="update-version-line"><span className="app-version">映窗 {state.version}</span><UpdateBadge updater={updater}/></div>
       </div>
     </Glass>
     <main className={`workspace ${selected.size && libraryPage ? 'has-selection' : ''}`}>
@@ -132,8 +135,10 @@ export function App() {
         <Glass as="section" refraction={false} className="settings-section"><h2>导出</h2><div className="settings-row"><div><h3>默认机型</h3><p>预览与导出使用相同尺寸</p></div><DeviceSelect devices={state.devices} value={state.settings.deviceId} onChange={async value => merge(await window.yingchuang.settings({ deviceId: value }))}/></div><div className="settings-row"><div><h3>保存位置</h3><p className="path-text" title={state.settings.outputDirectory}>{state.settings.outputDirectory}</p></div><button className="button secondary" onClick={async () => { const next = await window.yingchuang.chooseDirectory('output'); if (next) setState(next); }}><FolderOpen size={15}/>选择目录</button></div><div className="settings-row"><div><h3>转换方式</h3><p>场景壁纸默认图层模式，逐层还原特效并保留逐层感应；网页、应用与透视三维壁纸使用录制模式。可在编辑器“导出”中逐个调整</p></div><Sparkles size={18} color="var(--accent)"/></div></Glass>
         <Glass as="section" refraction={false} className="settings-section"><div className="settings-section-heading"><h2>壁纸目录</h2><button className="text-button" onClick={() => void addDirectory()}><Plus size={15}/>添加</button></div>{state.roots.map(root => <div className="directory-row" key={root}><FolderOpen size={18}/><div><span title={root}>{root}</span><small>自动发现</small></div></div>)}{state.settings.roots.map(root => <div className="directory-row" key={'manual-' + root}><FolderOpen size={18}/><div><span title={root}>{root}</span><small>手动添加</small></div><button className="icon-button" aria-label={`移除目录 ${root}`} onClick={async () => setState(await window.yingchuang.removeDirectory(root))}><X size={16}/></button></div>)}</Glass>
         <Glass as="section" refraction={false} className="settings-section"><h2>内置机型</h2><div className="device-grid">{state.devices.map(device => <div key={device.id}><MonitorSmartphone size={20} strokeWidth={1.4}/><span>{device.name}<small>{device.width} × {device.height}</small></span></div>)}</div></Glass>
+        <UpdateSettingsSection updater={updater} version={state.version}/>
       </div>}
     </main>
+    <UpdateDialog updater={updater}/>
     {editing && <Editor theme={editing} state={state} onClose={() => setEditing(null)} onState={merge} onConvert={() => setPage('queue')} onToast={notify}/>}
     {toast && <Glass key={toast.key} className={`toast ${toast.kind}`} role="status"><span className="toast-icon">{toast.kind === 'error' ? <X size={15} strokeWidth={2.6}/> : toast.kind === 'info' ? <Info size={15}/> : <Check size={15} strokeWidth={2.6}/>}</span>{toast.message}<span className="toast-timer"/></Glass>}
   </div></AppearanceContext.Provider>;

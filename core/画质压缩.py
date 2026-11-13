@@ -123,7 +123,7 @@ def _fit_images(stage, paths, crop, target, quality):
     return shrunk
 
 
-def _fit_video(path, info, crop, target, crf, budget):
+def _fit_video(path, info, crop, target, crf, budget, mirror=False):
     iw, ih = info["size"]
     if crop is None:
         box = (0, 0, 2, 2)
@@ -131,11 +131,11 @@ def _fit_video(path, info, crop, target, crf, budget):
         box = tuple(round(n * extent) for n, extent in zip(crop, (iw, ih, iw, ih)))
     a, b, c, d = box
     size, shrunk = _output_size((c - a, d - b), target, even=True)
-    if box == (0, 0, iw, ih) and size == (iw, ih) and path.stat().st_size <= budget:
+    if not mirror and box == (0, 0, iw, ih) and size == (iw, ih) and path.stat().st_size <= budget:
         return False
     # 给封装预留空间，并把两秒缓冲突发计入上限，短视频也不透支份额。
     rate = int((budget - max(8192, budget * .02) - info["audio"]) * 8 / (info["duration"] + 2))
-    filters = f"crop={c-a}:{d-b}:{a}:{b},scale={size[0]}:{size[1]}:flags=lanczos,setsar=1"
+    filters = ("hflip," if mirror else "")+f"crop={c-a}:{d-b}:{a}:{b},scale={size[0]}:{size[1]}:flags=lanczos,setsar=1"
     with tempfile.NamedTemporaryFile(prefix="画质压缩-", suffix=".mp4", dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
     try:
@@ -151,7 +151,7 @@ def _fit_video(path, info, crop, target, crf, budget):
     return shrunk
 
 
-def fit_layers(stage, layers, config, sw, sh) -> dict:
+def fit_layers(stage, layers, config, sw, sh, mirror=()) -> dict:
     """就地压缩 assets 和图层几何；统计包含 assets 内未引用的文件。"""
     before = _assets_size(stage)
     density, quality, crf = QUALITY[config.get("导出画质", "standard")]
@@ -195,7 +195,8 @@ def fit_layers(stage, layers, config, sw, sh) -> dict:
     # 各视频的预算互不影响，转码进程并行运行。
     with ThreadPoolExecutor(max_workers=4) as pool:
         fitted = list(pool.map(lambda job: _fit_video(stage / job[0], videos[job[0]], job[1], job[2], crf,
-                                                      (VIDEO_BUDGET - other) * videos[job[0]]["duration"] / duration), jobs))
+                                                      (VIDEO_BUDGET - other) * videos[job[0]]["duration"] / duration,
+                                                      mirror=job[0] in mirror), jobs))
     for (name, crop, target, members), changed in zip(jobs, fitted):
         if changed:
             shrunk.update(members)

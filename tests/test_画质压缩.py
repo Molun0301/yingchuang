@@ -254,9 +254,9 @@ def test_multiple_videos_share_remaining_budget_by_duration(tmp_path, source_vid
     allocations = []
     encode = compression._fit_video
 
-    def record(path, info, crop, target, crf, budget):
+    def record(path, info, crop, target, crf, budget, mirror=False):
         allocations.append((info["duration"], budget))
-        return encode(path, info, crop, target, crf, budget)
+        return encode(path, info, crop, target, crf, budget, mirror=mirror)
 
     monkeypatch.setattr(compression, "_fit_video", record)
     stats = compression.fit_layers(stage, [first, second], config(), 3840, 2160)

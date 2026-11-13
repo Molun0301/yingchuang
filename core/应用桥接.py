@@ -25,7 +25,7 @@ from 场景动效 import SceneAssets, build_motion_scene, effects_for, sprite_se
 if os.environ.get("YINGCHUANG_CORE"):
     converter.ROOT = Path(os.environ["YINGCHUANG_CORE"])
 
-CACHE_VERSION = 11
+CACHE_VERSION = 12
 ROLE_KEYS = dict(zip(clockwork.ROLES, ("week", "date", "time")))
 
 
@@ -187,15 +187,11 @@ def inspect_theme(request):
         try:
             if pkg.has(name):fonts.append({"value": "theme:" + name, "label": font_name(pkg.read(name), Path(name).stem)})
         except ValueError:pass
-    font_issue = ""
-    try:
-        selected = clockwork.select_fonts(pkg, scene["objects"], worlds, props)
-        has_clock = any(role_fonts.values())
-        source_fonts = {ROLE_KEYS[role]: record["字体文件"] for role, (_, record) in selected.items()}
-        source_colors = {ROLE_KEYS[role]: clockwork.ink_color({"文字颜色": "原主题"}, record) for role, (_, record) in selected.items()}
-    except ValueError as exc:
-        has_clock, source_fonts, source_colors = False, {}, {}
-        if any(role_fonts.values()): font_issue = str(exc)
+    selected = clockwork.select_fonts(pkg, scene["objects"], worlds, props)
+    has_clock = any(role_fonts.values())
+    font_issue = "；".join(dict.fromkeys(record["提醒"] for _,record in selected.values() if record.get("提醒")))
+    source_fonts = {ROLE_KEYS[role]: record["字体文件"] for role, (data, record) in selected.items() if data}
+    source_colors = {ROLE_KEYS[role]: clockwork.ink_color({"文字颜色": "原主题"}, record) for role, (data, record) in selected.items() if data}
     layers = []
     for obj in scene["objects"]:
         if not any(k in obj for k in ("image", "text", "particle")): continue
@@ -281,13 +277,16 @@ def layer_plan(request):
 def config_for(draft, device):
     c = deepcopy(converter.DEFAULTS)
     layout, motion = draft["layout"], draft.get("motion", {})
+    rows = {key:{"visible":key in clockwork.CORE_KEYS, **{k:spec[k] for k in ("x","y","size","align")},
+                 **deepcopy(layout["clock"]["rows"].get(key,{}))} for key,spec in clockwork.WIDGETS.items()}
     c.update({"预览宽度": device["width"], "预览高度": device["height"], "画面缩放": layout["scale"],
               "横向取景": layout["x"], "纵向取景": layout["y"], "避让左侧比例": device.get("safeLeft",.3),
+              "水平翻转": layout.get("flip",False), "镜头": deepcopy(device.get("camera")), "屏幕圆角": device.get("cornerRadius",0),
               "显示秒": layout["clock"].get("seconds",False), "星期语言": "中文" if layout["clock"].get("language")=="zh" else "英文",
               "时制": layout["clock"].get("format","24"), "机型": device["name"],
               "感应幅度": motion.get("amount",.02), "感应灵敏度": motion.get("sensitivity",4),
               "平滑系数": motion.get("smoothing",.16), "纵向感应比例": motion.get("vertical",.3),
-              "帧率": motion.get("fps",30), "时钟排版": deepcopy(layout["clock"]["rows"]),
+              "帧率": motion.get("fps",30), "时钟排版": rows,
               "视频音量": draft.get("properties",{}).get("__videoVolume",0),
               "时钟颜色": deepcopy(draft.get("appearance",{}).get("colors",{})),
               "导出画质": draft.get("export",{}).get("quality","standard")})
@@ -443,34 +442,27 @@ def selected_clock_fonts(theme,draft):
         pkg,_,scene,sw,sh,props = loaded_scene(theme,draft)
         worlds = converter.world_transforms(scene["objects"],props,sw,sh,[])
         original_theme={k:v for k,v in theme.items() if k not in {"resolvedScene","scriptResult"}}
-        original_pkg,_,original_scene,ow,oh,original_props = loaded_scene(original_theme,{})
+        _,_,original_scene,ow,oh,original_props = loaded_scene(original_theme,{})
         original_worlds=converter.world_transforms(original_scene["objects"],original_props,ow,oh,[])
         _,original_roles=clockwork.theme_font_sources(original_scene["objects"],original_worlds,original_props)
         _,current_roles=clockwork.theme_font_sources(scene["objects"],worlds,props)
         clock_ids={entry["编号"] for role,fonts in original_roles.items() if not current_roles[role] for entries in fonts.values() for entry in entries}
         for identifier in clock_ids:
             if worlds.get(identifier) is None:worlds[identifier]={"alpha":1}
-        selected = None
-        try: selected = clockwork.select_fonts(pkg,scene["objects"],worlds,props)
-        except ValueError:
-            # 原时钟被用户隐藏时只回溯原场景默认可见项，不混入隐藏媒体卡的字体。
-            try:selected=clockwork.select_fonts(original_pkg,original_scene["objects"],original_worlds,original_props)
-            except ValueError:
-                if not all(explicit.get(k) for k in ROLE_KEYS.values()): raise
-                selected = {}
+        selected = clockwork.select_fonts(pkg,scene["objects"],worlds,props)
     else:
-        pkg, selected = None, {}
-    for role,key in ROLE_KEYS.items():
+        pkg, selected = None, clockwork.select_fonts(None,[],{},{})
+    for key in clockwork.WIDGETS:
+        role = next((role for role,value in ROLE_KEYS.items() if value==key),key)
         choice = explicit.get(key,"")
-        if not choice:
-            if role not in selected: raise ValueError("请选择时钟字体。")
-            continue
-        if choice.startswith("theme:") and pkg is not None:
-            data = pkg.read(choice[6:])
-        else:
-            data = clockwork.read_font_data(Path(choice))
-        old = selected.get(role,(None,{}))[1]
-        selected[role] = (data,{**old,"字体文件":choice,"选取规则":"用户明确指定"})
+        if not choice:continue
+        old = {k:v for k,v in selected.get(role,(None,{}))[1].items() if k!="提醒"}
+        record = {**old,"字体文件":choice,"选取规则":"用户明确指定"}
+        try:
+            data = pkg.read(choice[6:]) if choice.startswith("theme:") and pkg is not None else clockwork.read_font_data(Path(choice))
+            selected[role] = (data,record)
+        except (ValueError,OSError) as exc:
+            selected[role] = (None,{**record,"提醒":f"无法读取{clockwork.WIDGETS[key]['name']}字体：{exc}"})
     return selected
 
 
@@ -500,8 +492,8 @@ def prepare_clock(request,config):
                     elif hour_match and datetime.now().hour>12 and int(hour_match[1])==datetime.now().hour%12:config["时制"]="12"
                     elif re.search(r'\b[AP]M\b',visible_text,re.I):config["时制"]="12"
                     else:config["时制"]="24"
-    key = digest({"version":CACHE_VERSION,"font":[sha256(x[0]).hexdigest() for x in selected.values()],
-                  "sources":[x[1] for x in selected.values()],"config":config})
+    key = digest({"version":CACHE_VERSION,"font":{k:sha256(x[0]).hexdigest() if x[0] else None for k,x in selected.items()},
+                  "sources":[x[1] for x in selected.values()],"config":{k:v for k,v in config.items() if k!="组件示例"}})
     root = Path(request["cacheRoot"])/"clocks"/key
     file = root/"字形.json"
     if file.is_file(): return root,json.loads(file.read_text(encoding="utf-8"))
@@ -534,12 +526,13 @@ def prepare(request, fast=False):
     root,payload = prepare_recording(request) if recorded else prepare_graphics(request,fast=fast)
     event("更新排版",94 if recorded or request["theme"]["type"]=="video" else 85)
     config = config_for(request["draft"],request["device"])
-    if recorded:config.update({"画面缩放":1,"横向取景":.5,"纵向取景":.5})
+    if recorded:config.update({"画面缩放":1,"横向取景":.5,"纵向取景":.5,"水平翻转":False})
     try:clock_root,clock = prepare_clock(request,config)
     except ValueError as exc:
         if request.get("operation")=="export":raise
         clock_root,clock=None,None
         payload={**payload,"clockError":str(exc)}
+    config["组件示例"]={**{key:field["sample"] for key,field in clockwork.FIELDS.items() if "sample" in field},**request.get("widgetSamples",{})}
     result={**payload,"config":config,"clock":clock,"assetRoot":str(root),"clockRoot":str(clock_root) if clock_root else None}
     if request["theme"]["type"]=="video":
         result["videoSpeed"]=1 if payload.get("progressive") else request["draft"].get("properties",{}).get("__videoSpeed",1)
@@ -559,10 +552,11 @@ def export(request):
         if payload["clockRoot"]:
             for file in (Path(payload["clockRoot"])/"assets").iterdir():shutil.copy2(file,stage/"assets"/file.name)
         layers = deepcopy(payload["layers"])
+        mirror = mirror_layers(stage,layers,payload["width"]) if payload["config"]["水平翻转"] else set()
         # 按背屏实际显示尺寸裁切与缩小贴图、视频，2K/4K 素材超出的像素在背屏上不可见。
         event("压缩资源",90)
         from 画质压缩 import fit_layers
-        compression = fit_layers(stage,layers,payload["config"],payload["width"],payload["height"])
+        compression = fit_layers(stage,layers,payload["config"],payload["width"],payload["height"],mirror)
         event("生成背屏包",94)
         for layer in layers:
             with Image.open(stage/layer["asset"]) as im:layer["image"] = im.convert("RGBA")
@@ -576,6 +570,28 @@ def export(request):
         atomic_json(Path(request["scratchRoot"])/"job-result.json",result)
         os.replace(stage,folder)
     return result
+
+
+def mirror_layers(stage,layers,width):
+    """镜像图层资源和场景坐标；倾斜序列交换内容，保留清单里的文件引用。"""
+    files, sequences, videos = set(), set(), set()
+    for layer in layers:
+        layer["x"]=width-layer["x"];layer["rotation"]=-layer["rotation"]
+        if "travel" in layer:layer["travel"]=[[t,-x,y] for t,x,y in layer["travel"]]
+        sequence=layer.get("sequence",{})
+        files.update([layer["asset"],*sequence.get("frames",[])])
+        if sequence.get("mode")=="tilt":sequences.add(tuple(sequence["frames"]))
+        if layer.get("video"):videos.add(layer["video"])
+    for file in sorted(files):
+        with Image.open(stage/file) as image:
+            kind=image.format;mirrored=image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        options={"quality":95,"subsampling":0} if kind=="JPEG" else {"lossless":True} if kind=="WEBP" else {}
+        mirrored.save(stage/file,format=kind,**options)
+    for frames in sorted(sequences):
+        for first,last in zip(frames[:len(frames)//2],reversed(frames)):
+            a,b=(stage/first).read_bytes(),(stage/last).read_bytes()
+            (stage/first).write_bytes(b);(stage/last).write_bytes(a)
+    return videos
 
 
 def list_fonts():
@@ -624,6 +640,7 @@ def main():
     elif operation == "clock":
         config=config_for(request["draft"],request["device"])
         root,clock=prepare_clock(request,config)
+        config["组件示例"]={**{key:field["sample"] for key,field in clockwork.FIELDS.items() if "sample" in field},**request.get("widgetSamples",{})}
         result={"clock":clock,"clockRoot":str(root) if root else None,"config":config}
     else: raise ValueError("未知操作。")
     print(json.dumps({"event":"result","result":result},ensure_ascii=False,allow_nan=False),flush=True)

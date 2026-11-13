@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Device, Draft, Layout, Preview, RowKey, SceneLayer } from './types';
+import type { ClockRow, Device, Draft, Layout, Preview, RowKey, SceneLayer } from './types';
 import timevariants from '../desktop/timevariants.cjs';
+import widgets from '../core/组件绘制.cjs';
+import definitions from '../core/组件.json';
 const weightAt: (points: number[][], minute: number) => number = timevariants.weightAt;
+const rowParts: (row:ClockRow, values:Record<string,number>)=>{w:number;parts:{file:string;x:number;w:number}[]} = widgets.rowParts;
+const samples=Object.fromEntries(Object.entries(definitions.fields).filter(([,field])=>'sample' in field).map(([key,field])=>[key,(field as {sample:number}).sample]));
 
 /** live 存在时为完整画面模式：画布透明，只绘制时钟与辅助线，并把取景位置同步给下方的实时渲染层 */
 type Props = { preview: Preview|null; draft: Draft; device: Device; poster: string; playing: boolean; tilt: boolean; mask: boolean;
@@ -11,7 +15,35 @@ type Props = { preview: Preview|null; draft: Draft; device: Device; poster: stri
   minute?: number|null };
 type Box = { key:RowKey; x:number; y:number; w:number; h:number };
 const clamp=(value:number,min=0,max=1)=>Math.max(min,Math.min(max,value));
-const roleName={week:'星期',date:'日期',time:'时间'};
+
+/** 镜头以机型像素绘制并缓存；细金属圈、镜筒与微弱镀膜反光保持克制。 */
+function cameraMask(device:Device):HTMLCanvasElement {
+  const image=document.createElement('canvas');image.width=device.width;image.height=device.height;
+  const ctx=image.getContext('2d')!,edge=device.width*device.safeLeft;
+  ctx.fillStyle='rgba(10,16,21,.17)';ctx.fillRect(0,0,edge,device.height);
+  ctx.strokeStyle='rgba(232,239,242,.4)';ctx.lineWidth=1;ctx.setLineDash([6,7]);ctx.beginPath();ctx.moveTo(edge,.5);ctx.lineTo(edge,device.height);ctx.stroke();ctx.setLineDash([]);
+  const circle=(r:number,fill:string|CanvasGradient)=>{ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.fillStyle=fill;ctx.fill();};
+  const {x,ys,r}=device.camera;
+  for(const y of ys){
+    ctx.save();ctx.translate(x,y);
+    ctx.shadowColor='rgba(0,0,0,.55)';ctx.shadowBlur=8;ctx.shadowOffsetY=2;circle(r+1,'#111619');ctx.shadowColor='transparent';
+    const metal=ctx.createConicGradient(-Math.PI/2,0,0);
+    for(const [at,color] of [[0,'#b7bec0'],[.07,'#4a5154'],[.19,'#171e22'],[.29,'#929b9e'],[.39,'#434b50'],[.51,'#c4cbcc'],[.60,'#596367'],[.73,'#1c2327'],[.84,'#9aa3a5'],[.93,'#515b60'],[1,'#b7bec0']] as const)metal.addColorStop(at,color);
+    circle(r,metal);
+    for(const ratio of [.988,.968,.948]){ctx.beginPath();ctx.arc(0,0,r*ratio,0,Math.PI*2);ctx.strokeStyle='rgba(236,244,245,.12)';ctx.lineWidth=.6;ctx.stroke();}
+    circle(r*.918,'#080b0d');circle(r*.884,'#293136');circle(r*.865,'#060a0d');
+    const glass=ctx.createRadialGradient(-r*.18,-r*.22,0,0,0,r*.85);
+    glass.addColorStop(0,'#14262e');glass.addColorStop(.32,'#08151b');glass.addColorStop(.68,'#071015');glass.addColorStop(.88,'#121c22');glass.addColorStop(1,'#020405');circle(r*.85,glass);
+    for(const [ratio,color] of [[.79,'#303a3f'],[.754,'#0b1014'],[.67,'#202d34'],[.626,'#03080c'],[.49,'#15232a'],[.455,'#03070a']] as const){ctx.beginPath();ctx.arc(0,0,r*ratio,0,Math.PI*2);ctx.strokeStyle=color;ctx.lineWidth=ratio===.754?3:1.1;ctx.stroke();}
+    circle(r*.41,'#020608');
+    ctx.save();ctx.beginPath();ctx.arc(0,0,r*.84,0,Math.PI*2);ctx.clip();
+    const coat=ctx.createRadialGradient(-r*.27,-r*.29,0,-r*.27,-r*.29,r*.75);
+    coat.addColorStop(0,'rgba(129,177,189,.18)');coat.addColorStop(.42,'rgba(65,118,133,.07)');coat.addColorStop(1,'rgba(49,83,95,0)');circle(r*.85,coat);
+    ctx.beginPath();ctx.ellipse(-r*.32,-r*.40,r*.095,r*.035,-Math.PI/5,0,Math.PI*2);ctx.fillStyle='rgba(227,240,242,.48)';ctx.fill();
+    ctx.restore();ctx.restore();
+  }
+  return image;
+}
 
 function sample(points:number[][],ms:number):number[] {
   if (!points.length)return [];
@@ -47,6 +79,7 @@ export function PreviewCanvas(props:Props) {
   const drag=useRef<{key:RowKey|'scene';x:number;y:number;layout:Layout}|null>(null);
   const [ready,setReady]=useState(false);
   const videos=useRef(new Map<string|number,HTMLVideoElement>()),loadedRoot=useRef(''),paintedRoot=useRef('');
+  const maskCache=useRef<{id:string;image:HTMLCanvasElement}|null>(null);
   const videoKey=JSON.stringify(props.preview?.layers.filter(l=>l.videoSource).map(l=>[l.id,l.videoSource]));
   useEffect(()=>{
     const elements=new Map<string|number,HTMLVideoElement>();
@@ -123,44 +156,42 @@ export function PreviewCanvas(props:Props) {
         const frame=node.parentElement?.querySelector<HTMLElement>('[data-live-frame]');
         if(frame){
           const k=node.clientWidth/width,ox=motion.current.x*width*draft.motion.amount,oy=motion.current.y*height*draft.motion.amount*draft.motion.vertical;
-          const box=`${(preview.width*scale*k).toFixed(1)}px ${(preview.height*scale*k).toFixed(1)}px translate(${((left+ox)*k).toFixed(1)}px,${((top+oy)*k).toFixed(1)}px)`;
-          if(frame.dataset.box!==box){frame.dataset.box=box;frame.style.width=(preview.width*scale*k).toFixed(1)+'px';frame.style.height=(preview.height*scale*k).toFixed(1)+'px';frame.style.transform=`translate(${((left+ox)*k).toFixed(1)}px,${((top+oy)*k).toFixed(1)}px)`;}
+          const transform=`translate(${((left+ox)*k).toFixed(1)}px,${((top+oy)*k).toFixed(1)}px) scaleX(${draft.layout.flip?-1:1})`;
+          const box=`${(preview.width*scale*k).toFixed(1)}px ${(preview.height*scale*k).toFixed(1)}px ${transform}`;
+          if(frame.dataset.box!==box){frame.dataset.box=box;frame.style.width=(preview.width*scale*k).toFixed(1)+'px';frame.style.height=(preview.height*scale*k).toFixed(1)+'px';frame.style.transform=transform;}
         }
       }
       const clock=new Date(),minute=current.current.minute??clock.getHours()*60+clock.getMinutes()+clock.getSeconds()/60;
       for(const layer of live?[]:preview.layers){
         const video=videos.current.get(layer.id);
-        const image=video&&video.readyState>=2?video:graphics.current.get(frameFile(layer,elapsed.current,motion.current.x))||graphics.current.get(layer.asset);
+        const image=video&&video.readyState>=2?video:graphics.current.get(frameFile(layer,elapsed.current,draft.layout.flip?-motion.current.x:motion.current.x))||graphics.current.get(layer.asset);
         if(!image)continue;
         const offset=layer.travel?.length?sample(layer.travel,elapsed.current):[0,0];
         const alpha=(layer.fade?.length?sample(layer.fade,elapsed.current)[0]/255:1)*(layer.time?weightAt(layer.time,minute):1);
         if(alpha<=0)continue;
         ctx.save();ctx.globalAlpha=alpha;
-        ctx.translate(left+(layer.x+offset[0])*scale+motion.current.x*width*draft.motion.amount*layer.motion,
+        ctx.translate(left+(draft.layout.flip?preview.width-layer.x-offset[0]:layer.x+offset[0])*scale+motion.current.x*width*draft.motion.amount*layer.motion,
           top+(layer.y+offset[1])*scale+motion.current.y*height*draft.motion.amount*layer.motion*draft.motion.vertical);
-        ctx.rotate(layer.rotation*Math.PI/180);
+        ctx.rotate((draft.layout.flip?-layer.rotation:layer.rotation)*Math.PI/180);
+        if(draft.layout.flip)ctx.scale(-1,1);
         ctx.drawImage(image,-layer.w*scale/2,-layer.h*scale/2,layer.w*scale,layer.h*scale);
         ctx.restore();
       }
       boxes.current=[];
       if(preview.clock&&draft.layout.clock.enabled){
-        const date=new Date();
-        const hourFormat=draft.layout.clock.format==='auto'?preview.clock.rows.find(r=>r.key==='time')?.hourFormat:draft.layout.clock.format;
-        const digits:Record<string,number>={Y:date.getFullYear(),M:date.getMonth()+1,D:date.getDate(),h:hourFormat==='12'?(date.getHours()%12||12):date.getHours(),m:date.getMinutes(),s:date.getSeconds()};
+        const values=widgets.values(new Date(),samples);
         for(const row of preview.clock.rows){
           const setting=draft.layout.clock.rows[row.key];if(!setting.visible||row.sourceVisible===false)continue;
-          const original=Number(preview.clock.fonts?.[roleName[row.key]]?.['字号'])||setting.size;
-          const unit=Math.min(width/976,height/596)*setting.size/original;
+          const parts=rowParts(row,values),unit=Math.min(width/976,height/596)*setting.size/row.size;
           let x=setting.x*width;const y=setting.y*height;
-          if(setting.align==='left')x+=row.w*unit/2;if(setting.align==='right')x-=row.w*unit/2;
+          if(setting.align==='left')x+=parts.w*unit/2;if(setting.align==='right')x-=parts.w*unit/2;
           const paint=(file:string|undefined,px:number,w:number)=>{const image=file?glyphs.current.get(file):null;if(image)ctx.drawImage(image,px-w*unit/2,y-row.h*unit/2,w*unit,row.h*unit);};
-          if(row.key==='week')paint(row.weekdays?.[date.getDay()],x,row.w);
-          else for(const part of row.pieces||[]){const field=part.digit;const file=field?row.digits?.[Math.floor(digits[field[0]]/(10**Number(field[1])))%10]:part.asset;paint(file,x+part.x*unit,part.w);}
-          const box={key:row.key,x:x-row.w*unit/2-9,y:y-row.h*unit/2-8,w:row.w*unit+18,h:row.h*unit+16};boxes.current.push(box);
+          for(const part of parts.parts)paint(part.file,x+part.x*unit,part.w);
+          const box={key:row.key,x:x-parts.w*unit/2-9,y:y-row.h*unit/2-8,w:parts.w*unit+18,h:row.h*unit+16};boxes.current.push(box);
           if(selected===row.key&&!tilt){ctx.save();ctx.strokeStyle='rgba(255,255,255,.9)';ctx.lineWidth=1.5;ctx.setLineDash([5,4]);ctx.strokeRect(box.x,box.y,box.w,box.h);ctx.setLineDash([]);ctx.fillStyle='#ffffff';for(const dx of [0,box.w])for(const dy of [0,box.h]){ctx.beginPath();ctx.arc(box.x+dx,box.y+dy,3,0,Math.PI*2);ctx.fill();}ctx.restore();}
         }
       }
-      if(mask){ctx.fillStyle='rgba(14,21,31,.44)';ctx.fillRect(0,0,width*device.safeLeft,height);ctx.save();ctx.strokeStyle='rgba(255,255,255,.5)';ctx.setLineDash([6,6]);ctx.beginPath();ctx.moveTo(width*device.safeLeft,0);ctx.lineTo(width*device.safeLeft,height);ctx.stroke();ctx.restore();}
+      if(mask){if(maskCache.current?.id!==device.id)maskCache.current={id:device.id,image:cameraMask(device)};ctx.drawImage(maskCache.current.image,0,0);}
       const readyKey=live?(live.ready?'live:'+preview.assetRoot:''):(loadedRoot.current===preview.assetRoot?preview.assetRoot:'');
       if(readyKey&&paintedRoot.current!==readyKey){
         paintedRoot.current=readyKey;node.dataset.sceneReady='true';node.dataset.readyAt=String(performance.now());node.dataset.layerCount=String(preview.layers.length);
@@ -172,7 +203,7 @@ export function PreviewCanvas(props:Props) {
   },[]);
   function coords(event:React.PointerEvent<HTMLCanvasElement>){const box=event.currentTarget.getBoundingClientRect();return{x:(event.clientX-box.left)/box.width,y:(event.clientY-box.top)/box.height};}
   return <canvas ref={canvas} width={props.device.width} height={props.device.height} data-testid="wallpaper-canvas"
-    aria-label="壁纸预览，可滚轮缩放、拖动构图和时间位置" className={`wallpaper-canvas ${ready?'is-ready':''} ${props.tilt?'tilt-mode':''} ${props.live?'live':''}`}
+    aria-label="壁纸预览，可滚轮缩放、拖动构图和组件位置" className={`wallpaper-canvas ${ready?'is-ready':''} ${props.tilt?'tilt-mode':''} ${props.live?'live':''}`}
     style={{backgroundImage:props.poster&&!props.live?`url("${props.poster}")`:undefined}}
     onPointerDown={event=>{
       if(props.tilt)return;

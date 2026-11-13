@@ -191,9 +191,9 @@ def test_animated_image_preserves_non_uniform_frame_times(tmp_path):
     source=tmp_path/'动画.gif'
     frames=[Image.new('RGB',(48,32),color) for color in ('red','green','blue')]
     frames[0].save(source,save_all=True,append_images=frames[1:],duration=[70,150,80],loop=0)
-    with pytest.raises(ValueError, match='无法确定星期的原字体'):
-        M.convert(source,tmp_path/'未指定字体',M.load_config(None))
-    assert not (tmp_path/'未指定字体').exists()
+    fallback,report=M.convert(source,tmp_path/'未指定字体',M.load_config(None))
+    assert fallback.is_file() and '时间' in report['字体来源']
+    assert any('已临时改用' in note for note in report['未迁移及注意事项'])
     result,report=M.convert(source,tmp_path/'动画成品',M.load_config(None),no_clock=True)
     assert report['恢复效果']==['图片帧动画']
     with zipfile.ZipFile(result) as z:
@@ -223,7 +223,7 @@ def test_cat_fonts_match_visible_source_and_clock_ink_is_centered(tmp_path, cat)
         assert {pixel[:3] for pixel in ink.getdata() if pixel[3]} == {(10,25,30)}
 
 
-def test_ambiguous_clock_font_requires_explicit_choice(tmp_path):
+def test_ambiguous_clock_font_selects_source_with_warning(tmp_path):
     objects=[{'id':i,'name':role,'text':sample,'font':font}
              for i, (role,sample,font) in enumerate([
                  ('weekday','FRIDAY','fonts/a.otf'),('date','2026.11.06','fonts/a.otf'),
@@ -232,8 +232,13 @@ def test_ambiguous_clock_font_requires_explicit_choice(tmp_path):
     (tmp_path/'fonts').mkdir()
     (tmp_path/'fonts/a.otf').write_bytes(M.Package(SOURCE).read('fonts/Garet-Book.otf'))
     (tmp_path/'fonts/b.otf').write_bytes(M.Package(SOURCE).read('fonts/Harukaze.otf'))
-    with pytest.raises(ValueError, match='时间对应多个源字体'):
-        select_fonts(folder,objects,{i:{'alpha':1} for i in range(4)},{})
+    selected=select_fonts(folder,objects,{i:{'alpha':1} for i in range(4)},{})
+    assert selected['时间'][0]==(tmp_path/'fonts/a.otf').read_bytes()
+    assert '多个字体' in selected['时间'][1]['提醒']
+    (tmp_path/'assets').mkdir()
+    clock=build_clock(tmp_path,M.load_config(None),selected)
+    assert any(row['key']=='time' for row in clock['rows'])
+    assert any(warning['key']=='time' and '多个字体' in warning['message'] for warning in clock['warnings'])
 
 
 def test_rg88_light_uses_green_for_opacity_but_shake_uses_signed_directions(tmp_path):

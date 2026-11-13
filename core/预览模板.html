@@ -12,6 +12,7 @@ main{max-width:1200px;margin:auto;padding:48px 36px}header{display:flex;justify-
 .preview{padding:20px;border:1px solid #334653;border-radius:32px;background:#050a11;box-shadow:0 24px 70px #0005}
 .screen{position:relative;width:100%;overflow:hidden;background:#061633;border-radius:20px;cursor:grab;touch-action:none}.screen:active{cursor:grabbing}canvas{width:100%;height:100%;display:block}.camera{position:absolute;inset:0 auto 0 0;display:none;width:30%;background:#0a101bde;pointer-events:none;align-items:center;justify-content:space-evenly;flex-direction:column;backdrop-filter:blur(6px)}
 .lens{width:42%;aspect-ratio:1;border:5px solid #1a202a;background:radial-gradient(circle at 42% 38%,#203952,#030711 35%,#0d1523 62%,#020408 66%);border-radius:100%;box-shadow:0 0 0 2px #3d4148}.camera small{color:#8f9aa6;font-size:11px}
+.camera.real{width:100%;background:none;backdrop-filter:none}.camera.real .lens{position:absolute;transform:translate(-50%,-50%);border-color:#30353c;background:radial-gradient(ellipse at 34% 27%,#76849c55,transparent 22%),radial-gradient(circle at 58% 63%,#16375b,#070c18 37%,#010307 66%);box-shadow:0 0 0 2px #686d73,inset 0 0 8px #000}.safe-line{position:absolute;top:0;bottom:0;border-left:1px dashed #b8d5db99}
 .bar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:24px 0 0}.buttons{display:flex;gap:10px;flex-wrap:wrap}button{font:inherit;border:1px solid #395265;background:#132636;color:#ddecfa;border-radius:10px;padding:10px 16px;cursor:pointer;font-size:13px}button:hover{background:#203b50}button[aria-pressed=true]{border-color:#92d7ee;background:#224151}.hint{font-size:12px;color:#8fa4b7}
 .readout{font-variant-numeric:tabular-nums;letter-spacing:1px;color:#b5cedb;font-size:12px}
 .details{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:32px;padding-top:25px;border-top:1px solid #293c49}.details b{display:block;font-size:14px;font-weight:500;margin-bottom:10px}.details p{font-size:12px;line-height:1.9;color:#93a6b8;margin:0}.foot{margin-top:28px;color:#71889c;font-size:11px;line-height:1.9}
@@ -25,6 +26,11 @@ main{max-width:1200px;margin:auto;padding:48px 36px}header{display:flex;justify-
  <p class="foot">电脑交互预览。手机导入、感应和实际开孔布局待实机检查。</p>
 </main>
 <script>
+(function () {
+  const module = { exports: {} };
+  __WIDGET_DRAW__
+  globalThis.YingchuangWidgets = module.exports;
+})();
 const scene = __SCENE_DATA__;
 const config = scene.config;
 const canvas = document.getElementById('canvas');
@@ -41,6 +47,19 @@ previewScreen.style.aspectRatio = canvas.width + '/' + canvas.height;
 document.getElementById('title').textContent = scene.title + (animated ? ' · 动效背屏' : ' · 感应背屏');
 document.title = scene.title + ' · 交互预览';
 camera.style.width = config['避让左侧比例'] * 100 + '%';
+if (config['镜头']) {
+  const spec = config['镜头'];
+  camera.classList.add('real'); camera.style.width = '100%'; camera.replaceChildren();
+  for (const y of spec.ys) {
+    const lens = document.createElement('div'); lens.className = 'lens';
+    Object.assign(lens.style, { left: spec.x / canvas.width * 100 + '%', top: y / canvas.height * 100 + '%',
+      width: 2 * spec.r / canvas.width * 100 + '%', height: 2 * spec.r / canvas.height * 100 + '%' });
+    camera.appendChild(lens);
+  }
+  const line = document.createElement('div'); line.className = 'safe-line';
+  line.style.left = config['避让左侧比例'] * 100 + '%'; camera.appendChild(line);
+}
+if (config['屏幕圆角']) previewScreen.style.borderRadius = config['屏幕圆角'] / canvas.width * 100 + '% / ' + config['屏幕圆角'] / canvas.height * 100 + '%';
 if (animated) {
   document.getElementById('motion-label').textContent = '场景动效';
   document.getElementById('motion-note').textContent = '图层动效自动播放，拖动或移动鼠标可模拟手机倾斜。';
@@ -59,7 +78,7 @@ const sceneTop = Math.min(-marginY, Math.max(canvas.height - scene.height * scal
 const assetFiles = new Set(scene.layers.flatMap(layer => [layer.asset, ...(layer.sequence?.frames ?? [])]));
 if (clock) {
   for (const file of clock.assets) assetFiles.add(file);
-  document.getElementById('clock-note').textContent = '三行上下居中，预览和壁纸包使用同一组原字体字形。';
+  document.getElementById('clock-note').textContent = '运动健康和天气使用示例数据。';
 } else {
   document.getElementById('clock-note').textContent = '此包按选择仅转换画面和动效。';
 }
@@ -139,13 +158,6 @@ function layerImage(layer, ms, tilt) {
   return seq.frames[index];
 }
 
-function clockLines(date) {
-  if (!clock) return [];
-  const pad = value => String(value).padStart(2, '0');
-  return [clock.week_names[date.getDay()], date.getFullYear() + '.' + pad(date.getMonth()+1) + '.' + pad(date.getDate()),
-          pad(date.getHours()) + ':' + pad(date.getMinutes()) + (config['显示秒'] ? ':' + pad(date.getSeconds()) : '')];
-}
-
 function drawClock(date) {
   if (!clock) return;
   const left = canvas.width * config['避让左侧比例'];
@@ -155,25 +167,18 @@ function drawClock(date) {
   const half = clock.half_width*unit + clock.margin;
   const x = clamp(canvas.width*config['文字中心位置'], left+half, canvas.width-half);
   const y = canvas.height/2;
-  const values = {Y:date.getFullYear(), M:date.getMonth()+1, D:date.getDate(),
-                  h:date.getHours(), m:date.getMinutes(), s:date.getSeconds()};
+  const samples = config['组件示例'] || {};
+  const values = YingchuangWidgets.values(date, samples, samples.lm !== undefined && samples.ld !== undefined ? { lm: samples.lm, ld: samples.ld } : undefined);
   const paint = (file, cx, cy, w, h) =>
     ctx.drawImage(images.get(file), cx-w*unit/2, cy-h*unit/2, w*unit, h*unit);
   for (const row of clock.rows) {
     if (row.visible === false) continue;
+    const parts = YingchuangWidgets.rowParts(row, values);
     let rowX = row.nx === undefined ? x : row.nx*canvas.width;
     const rowY = row.ny === undefined ? y + row.y*unit : row.ny*canvas.height;
-    if (row.align === 'left') rowX += row.w*unit/2;
-    if (row.align === 'right') rowX -= row.w*unit/2;
-    values.h = row.hourFormat === '12' ? (date.getHours()%12 || 12) : date.getHours();
-    if (row.key === 'week') {
-      paint(row.weekdays[date.getDay()], rowX, rowY, row.w, row.h);
-      continue;
-    }
-    for (const part of row.pieces) {
-      const file = part.asset ?? row.digits[Math.floor(values[part.digit[0]] / (10 ** Number(part.digit[1]))) % 10];
-      paint(file, rowX+part.x*unit, rowY, part.w, row.h);
-    }
+    if (row.align === 'left') rowX += parts.w*unit/2;
+    if (row.align === 'right') rowX -= parts.w*unit/2;
+    for (const part of parts.parts) paint(part.file, rowX+part.x*unit, rowY, part.w, row.h);
   }
 }
 

@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const {parseVdf,steamCandidates,libraryPaths,discover}=require('../desktop/discovery.cjs');
-const {defaultDraft,makeTemplate,applyTemplate,builtinTemplates}=require('../desktop/model.cjs');
+const {ROWS,defaultDraft,cleanLayout,makeTemplate,applyTemplate,builtinTemplates}=require('../desktop/model.cjs');
 const {ConversionQueue}=require('../desktop/queue.cjs');
 const {Store}=require('../desktop/store.cjs');
 
@@ -38,6 +38,42 @@ test('模板只迁移布局，不带走字体、颜色、主题属性和机型',
   assert.equal(result.deviceId,second.deviceId);assert.deepEqual(result.layers,{});assert(!JSON.stringify(template).includes('fonts'));
   assert.equal(applyTemplate(defaultDraft({},false),template).layout.clock.enabled,true);
   result.layout.clock.rows.time.y=.2;assert.equal(second.layout.clock.rows.time.y,.62);assert.equal(template.layout.rows.time.y,.73);
+});
+
+test('组件定义驱动默认排版，旧草稿补齐隐藏的新组件并保留原设置',()=>{
+  const {widgets}=require('../core/组件.json'),draft=defaultDraft();
+  assert.deepEqual(ROWS,widgets.map(widget=>widget.key));
+  for(const widget of widgets){
+    const row=draft.layout.clock.rows[widget.key];
+    assert.equal(row.visible,Boolean(widget.core));assert.equal(row.x,widget.x);assert.equal(row.size,widget.size);
+    assert.equal(draft.appearance.fonts[widget.key],'');assert.equal(draft.appearance.colors[widget.key],'');
+  }
+  const layout=cleanLayout({clock:{language:'zh',rows:{time:{visible:false,x:.81,size:92}}}});
+  assert.equal(layout.clock.rows.time.visible,false);assert.equal(layout.clock.rows.time.x,.81);assert.equal(layout.clock.rows.time.size,92);
+  assert.equal(layout.clock.language,'zh');assert.equal(layout.clock.rows.steps.visible,false);
+  assert.equal(layout.clock.rows.text.text,widgets.find(widget=>widget.key==='text').sample);
+});
+
+test('水平翻转只随草稿保存，模板双向套用均不改变当前翻转',()=>{
+  for(const sourceFlip of [true,false])for(const targetFlip of [true,false]){
+    const first=defaultDraft();first.layout.flip=sourceFlip;first.layout.clock.rows.time.x=.88;
+    const template=makeTemplate('靠右',first.layout),second=defaultDraft();second.layout.flip=targetFlip;
+    assert.equal('flip' in template.layout,false);assert.equal(cleanLayout(first.layout).flip,sourceFlip);
+    const result=applyTemplate(second,template);
+    assert.equal(result.layout.flip,targetFlip);assert.equal(result.layout.clock.rows.time.x,.88);
+  }
+});
+
+test('组件标签与自定义文字可保存；旧模板缺少的组件保留草稿值',()=>{
+  const draft=defaultDraft();draft.layout.clock.rows.steps={visible:true,x:.45,y:.88,size:28,align:'left',label:false};
+  const text='今天开心🌻'.repeat(12);draft.layout.clock.rows.text={visible:true,x:.7,y:.2,size:31,align:'right',text};
+  draft.appearance.fonts.steps='/字体.ttf';draft.appearance.colors.steps='#88aa99';
+  const result=applyTemplate(draft,{layout:{scale:1.2,x:.3,y:.6,rows:{time:{visible:true,x:.9,y:.4,size:80,align:'right'}}}});
+  assert.deepEqual(result.layout.clock.rows.steps,draft.layout.clock.rows.steps);
+  assert.equal(result.layout.clock.rows.text.text,[...text].slice(0,40).join(''));assert.equal([...result.layout.clock.rows.text.text].length,40);
+  assert.deepEqual(result.appearance,draft.appearance);assert.equal(draft.layout.clock.rows.text.text,text);
+  const template=makeTemplate('组件排版',result.layout);
+  assert.equal(template.layout.rows.steps.label,false);assert.equal(template.layout.rows.text.text,result.layout.clock.rows.text.text);
 });
 
 test('排版与收藏重新启动后仍在',async()=>{
