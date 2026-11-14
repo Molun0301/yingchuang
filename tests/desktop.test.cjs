@@ -29,6 +29,27 @@ test('手动根目录与多库扫描能找到实际项目，重复路径不重�
   }finally{await fs.rm(base,{recursive:true,force:true});}
 });
 
+test('WE 设置：按工坊编号或规范路径匹配，兼容 Monitor0 和扁平表，只覆盖作者已有属性',async()=>{
+  const base=await fs.mkdtemp(path.join(__dirname,'settings-'));
+  try{
+    const steam=path.join(base,'Steam'),library=path.join(base,'Games');
+    const workshop=path.join(library,'steamapps/workshop/content/431960/42'),flat=path.join(library,'steamapps/common/wallpaper_engine/projects/myprojects/本地');
+    const engine=path.join(steam,'steamapps/common/wallpaper_engine');
+    await fs.mkdir(engine,{recursive:true});await fs.mkdir(workshop,{recursive:true});await fs.mkdir(flat,{recursive:true});
+    await fs.writeFile(path.join(steam,'steamapps/libraryfolders.vdf'),`"libraryfolders" { "1" { "path" "${library}" } }`);
+    const project={file:'scene.json',general:{properties:{enabled:{type:'bool',value:true},amount:{type:'slider',value:1},text:{type:'textinput',value:'默认'},untouched:{value:9}}}};
+    await fs.writeFile(path.join(workshop,'project.json'),JSON.stringify(project));await fs.writeFile(path.join(flat,'project.json'),JSON.stringify(project));
+    await fs.writeFile(path.join(engine,'config.json'),JSON.stringify({userA:{wproperties:{
+      'D:\\SteamLibrary\\steamapps\\workshop\\content\\431960\\42\\scene.pkg':{Monitor1:{enabled:true,amount:8},Monitor0:{enabled:{value:false},amount:0,extra:{value:99}}},
+      [flat.toUpperCase().replace(/\//g,'\\')]:{enabled:false,amount:{value:.25},text:{value:''}},
+      'C:/steamapps/workshop/content/431960/420/scene.pkg':{enabled:true},
+    }},userB:{wproperties:{'E:/steamapps/workshop/content/431960/42/scene.pkg':{Monitor2:{text:{value:'第一台显示器'}}}}}}));
+    const result=await discover([steam]);
+    assert.deepEqual(result.themes.find(theme=>theme.folder===workshop).propertyValues,{enabled:false,amount:0,text:'第一台显示器',untouched:9});
+    assert.deepEqual(result.themes.find(theme=>theme.folder===flat).propertyValues,{enabled:false,amount:.25,text:'',untouched:9});
+  }finally{await fs.rm(base,{recursive:true,force:true});}
+});
+
 test('模板只迁移布局，不带走字体、颜色、主题属性和机型',()=>{
   const first=defaultDraft({birds:false});first.deviceId='xiaomi-17-pro';first.appearance.fonts.time='/自选字体.ttf';first.appearance.colors.time='#fa1234';first.layout.clock.rows.time.y=.73;first.layers={'4':{visible:false}};
   const template=makeTemplate('落款',first.layout);
@@ -54,6 +75,52 @@ test('组件定义驱动默认排版，旧草稿补齐隐藏的新组件并保�
   assert.equal(layout.clock.rows.text.text,widgets.find(widget=>widget.key==='text').sample);
 });
 
+test('组件语言逐行清洗，旧草稿的星期沿用原语言，其余默认中文',()=>{
+  for(const language of ['zh','en']){
+    const layout=cleanLayout({clock:{language}});
+    for(const key of ROWS)assert.equal(layout.clock.rows[key].language,key==='week'?language:'zh');
+    const saved=cleanLayout({clock:{language,rows:{week:{language:language==='zh'?'en':'zh'},steps:{language:'en'},weather:{language:'fr'}}}});
+    assert.equal(saved.clock.rows.week.language,language==='zh'?'en':'zh');
+    assert.equal(saved.clock.rows.steps.language,'en');assert.equal(saved.clock.rows.weather.language,'zh');
+  }
+  assert.equal(defaultDraft().layout.clock.rows.week.language,'en');
+});
+
+test('套用新旧模板均保留草稿各行语言，缩略图保留模板的语言示例',()=>{
+  const first=defaultDraft(),second=defaultDraft();
+  first.layout.clock.rows.week.language='zh';first.layout.clock.rows.steps.language='en';first.layout.clock.rows.steps.x=.8;
+  const template=makeTemplate('双语组件',first.layout);
+  second.layout.clock.rows.weather.language='en';
+  const result=applyTemplate(second,template);
+  for(const key of ROWS)assert.equal(result.layout.clock.rows[key].language,second.layout.clock.rows[key].language);
+  assert.equal(result.layout.clock.rows.steps.x,.8);
+  assert.equal(template.layout.rows.week.language,'zh');assert.equal(template.layout.rows.steps.language,'en');
+  const legacy=defaultDraft();legacy.layout.clock.language='zh';
+  for(const key of ROWS)delete legacy.layout.clock.rows[key].language;
+  const migrated=applyTemplate(legacy,template);
+  assert.equal(migrated.layout.clock.rows.week.language,'zh');assert.equal(migrated.layout.clock.rows.steps.language,'zh');
+  assert.equal(applyTemplate(second,{layout:{...template.layout,rows:{time:template.layout.rows.time}}}).layout.clock.rows.weather.language,'en');
+});
+
+test('组件示例按行语言使用英文格式与选项，中文格式保持原样',()=>{
+  const definitions=require('../core/组件.json'),{widgetText}=require('../core/组件绘制.cjs');
+  const values={...Object.fromEntries(Object.entries(definitions.fields).filter(([,field])=>'sample'in field).map(([key,field])=>[key,field.sample])),lm:9,ld:23,w:5};
+  const english={week:'FRIDAY',lunar:'Lunar 10/24',steps:'6542 steps',distance:'4.36 km',calories:'238 kcal',active:'Active 32 min',goal:'Goal 82%',
+    weather:'Cloudy',humidity:'Humidity 64%',air:'AQI Good',sunrise:'Sunrise 06:42',sunset:'Sunset 17:08',battery:'Battery 86%',sms:'SMS 2',calls:'Missed 1'};
+  assert.deepEqual(definitions.widgets.filter(widget=>widget.lang).map(widget=>widget.key).sort(),Object.keys(english).sort());
+  for(const widget of definitions.widgets){
+    assert.equal(widgetText(definitions,widget.key,{language:'zh'},values),widget.key==='week'?'星期五':widget.sample);
+    if(widget.lang)assert.equal(widgetText(definitions,widget.key,{language:'en'},values),english[widget.key]);
+  }
+  assert.equal(widgetText(definitions,'lunar',{language:'en'},{...values,lm:23,ld:29}),'Lunar L12/30');
+  assert.equal(widgetText(definitions,'lunar',{language:'en',label:false},{...values,lm:12,ld:0}),'L1/1');
+  assert.equal(widgetText(definitions,'steps',{language:'en',label:false},values),'6542');
+  for(const [field,key] of [['wx','weather'],['air','air'],['lm','lunar'],['ld','lunar']]){
+    const options=definitions.fields[field];assert.equal(options.choices.length,options.choices_en.length);
+    for(let index=0;index<options.choices_en.length;index++)assert(widgetText(definitions,key,{language:'en'},{...values,[field]:index}).includes(options.choices_en[index]));
+  }
+});
+
 test('水平翻转只随草稿保存，模板双向套用均不改变当前翻转',()=>{
   for(const sourceFlip of [true,false])for(const targetFlip of [true,false]){
     const first=defaultDraft();first.layout.flip=sourceFlip;first.layout.clock.rows.time.x=.88;
@@ -65,8 +132,8 @@ test('水平翻转只随草稿保存，模板双向套用均不改变当前翻�
 });
 
 test('组件标签与自定义文字可保存；旧模板缺少的组件保留草稿值',()=>{
-  const draft=defaultDraft();draft.layout.clock.rows.steps={visible:true,x:.45,y:.88,size:28,align:'left',label:false};
-  const text='今天开心🌻'.repeat(12);draft.layout.clock.rows.text={visible:true,x:.7,y:.2,size:31,align:'right',text};
+  const draft=defaultDraft();draft.layout.clock.rows.steps={visible:true,x:.45,y:.88,size:28,align:'left',label:false,language:'zh'};
+  const text='今天开心🌻'.repeat(12);draft.layout.clock.rows.text={visible:true,x:.7,y:.2,size:31,align:'right',text,language:'zh'};
   draft.appearance.fonts.steps='/字体.ttf';draft.appearance.colors.steps='#88aa99';
   const result=applyTemplate(draft,{layout:{scale:1.2,x:.3,y:.6,rows:{time:{visible:true,x:.9,y:.4,size:80,align:'right'}}}});
   assert.deepEqual(result.layout.clock.rows.steps,draft.layout.clock.rows.steps);
@@ -145,27 +212,4 @@ test('没有 type 字段的旧工程按入口文件判断网页、应用和场�
     const types=Object.fromEntries((await discover([base])).themes.filter(t=>t.folder.startsWith(base)).map(t=>[t.title,t.type]));
     assert.deepEqual(types,{app:'application',page:'web',legacy:'scene',clip:'video'});
   }finally{await fs.rm(base,{recursive:true,force:true});}
-});
-
-test('时段变化：瞬间切换按分钟定位，渐变按线性过渡，持续变化的对象排除，叠加后权重不出现空档',async()=>{
-  const {planTimeVariants,weightAt}=require('../desktop/timevariants.cjs');
-  // a：8:20–17:00 显示白天贴图，其余显示夜晚；b：9:36–12:00 透明度渐变；c：每分钟都变（时钟类）
-  const evaluate=async minute=>({objects:[
-    {id:1,name:'a',image:minute>=500&&minute<1020?'day':'night'},
-    {id:2,name:'b',alpha:Math.round(Math.min(1,Math.max(0,(minute-576)/144))*100)/100},
-    {id:3,name:'c',text:String(minute)},{id:4,name:'不变',image:'x'}]});
-  const plan=await planTimeVariants(evaluate,new Set([99]));
-  assert.deepEqual(Object.keys(plan.objects).sort(),['1','2']);assert(plan.notes.some(note=>note.includes('c')));
-  const a=plan.objects['1'];assert.equal(a.length,2);
-  const day=a.find(v=>plan.scenes[v.scene].objects[0].image==='day'),night=a.find(v=>v!==day);
-  for(const [minute,expectDay] of [[499,0],[501,1],[1019,1],[1021,0],[0,0],[720,1]]){
-    assert.equal(Math.round(weightAt(day.alpha,minute)),expectDay,`白天 ${minute}`);
-    // 下层变体在切换后保持不透明，上层叠加，合成画面不出现透明空档
-    assert(Math.max(weightAt(day.alpha,minute),weightAt(night.alpha,minute))>.99,`空档 ${minute}`);
-  }
-  const b=plan.objects['2'];assert.equal(b.length,2);
-  const full=b.find(v=>plan.scenes[v.scene].objects[1].alpha===1),none=b.find(v=>v!==full);
-  // 渐变期间上层权重按线性变化，下层保持 1
-  const upper=b.indexOf(full)>b.indexOf(none)?full:none;
-  const mid=weightAt(upper.alpha,(570+720)/2);assert(mid>.3&&mid<.7,`渐变中点 ${mid}`);
 });

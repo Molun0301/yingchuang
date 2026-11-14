@@ -97,6 +97,25 @@ def test_export_replaces_objects_in_order_and_reports_variants(time_request):
     assert root.get('useVariableUpdater')=='DateTime.Minute'
 
 
+def test_export_appends_planning_notes_in_order_without_changing_motion_preview(time_request):
+    time_request['theme']['scriptResult']={'evaluated':True,'errors':['脚本解析失败']}
+    preview=bridge.prepare({**time_request,'operation':'motion-preview'})
+    existing=preview['notes']
+    assert existing
+    fade='A · 持续随时间变化，以 4 个关键时刻渐变近似'
+    fixed='B · 持续随时间变化，按导出时刻固定'
+    time_request['notes']=[fade,existing[0],fixed,fade,existing[-1],fixed]
+    original=deepcopy(time_request)
+    result=bridge.export(time_request)
+    report=json.loads((Path(result['folder'])/'转换报告.json').read_text(encoding='utf-8'))
+    assert report['未迁移及注意事项']==[*existing,fade,fixed]
+    assert result['notes']==len(existing)+2
+    assert time_request==original
+    assert bridge.prepare({**time_request,'operation':'motion-preview'})['notes']==existing
+    saved=json.loads((Path(preview['assetRoot'])/'场景.json').read_text(encoding='utf-8'))
+    assert saved['notes']==existing
+
+
 @pytest.mark.parametrize('points',[SWITCH,inverse(SWITCH),FADE,inverse(FADE),[[0,.2],[1440,.8]]])
 def test_time_expression_matches_linear_interpolation(points):
     root=ET.fromstring(converter.make_manifest(64,48,[image_layer(time=points)],converter.DEFAULTS))
@@ -141,7 +160,7 @@ def test_variant_world_transforms_include_parent_and_decode_only_output_objects(
     payload=bridge.prepare(time_request)
     layer=payload['layers'][0]
     assert {key:layer[key] for key in ('id','x','y','w','h','opacity')}=={
-        'id':'1_t1','x':26,'y':9,'w':48,'h':36,'opacity':.5}
+        'id':'1_t1','x':26,'y':9,'w':48,'h':36,'opacity':1}
     assert native==[['1_t1',3]]
 
 

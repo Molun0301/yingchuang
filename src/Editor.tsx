@@ -1,8 +1,8 @@
 import { Select } from './Select';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Play, Pause, MousePointer2, Move, RotateCcw, Save, SlidersHorizontal, Layers, LayoutTemplate, Check, AlignLeft, AlignCenter, AlignRight, Search, LoaderCircle, FolderOpen, Clock3, Sparkles, Music, ScanEye, Info, ChevronRight, TriangleAlert, ArrowDownToLine, Clapperboard, LayoutGrid, CalendarDays, Moon, Footprints, Route, Flame, Activity, Target, CloudSun, Thermometer, Droplets, Wind, Sunrise, Sunset, BatteryMedium, MessageSquare, PhoneMissed, Type } from 'lucide-react';
-import type { AppState, Draft, ExportSettings, FontOption, Layout, Preview, RowKey, SourceLayer, Theme, ThemeDetail } from './types';
-import type { LiveLoad, LivePatch } from './live/protocol';
+import type { AppState, Draft, ExportSettings, FontOption, Layout, Preview, Property, RowKey, SourceLayer, Theme, ThemeDetail } from './types';
+import type { LiveInfo, LiveLoad, LivePatch } from './live/protocol';
 import { PreviewCanvas } from './PreviewCanvas';
 import { LiveStage, type LiveStageHandle } from './LiveStage';
 import { ColorWell, PropertyControl, ResetButton, Slider, Toggle } from './controls';
@@ -10,15 +10,29 @@ import { colorHex, conditionVisible, sourceColor } from './conditions';
 import { Glass } from './appearance';
 import { Segmented, TypeIcon, typeNames, type ToastKind } from './ui';
 import { frameScene, recordSize } from './live/framing';
+import './updater.css';
 import definitions from '../core/组件.json';
 
 const rows = definitions.widgets.map(widget => widget.key);
 const rowNames: Record<RowKey, string> = Object.fromEntries(definitions.widgets.map(widget => [widget.key, widget.name]));
 const widgetIcons: Record<RowKey, typeof Clock3> = { time: Clock3, date: CalendarDays, week: CalendarDays, lunar: Moon, steps: Footprints, distance: Route, calories: Flame, active: Activity, goal: Target, weather: CloudSun, temperature: Thermometer, range: Thermometer, humidity: Droplets, air: Wind, sunrise: Sunrise, sunset: Sunset, battery: BatteryMedium, sms: MessageSquare, calls: PhoneMissed, text: Type };
 const defaultExport: ExportSettings = { mode: 'layers', duration: 10, fps: 30, loop: true, fade: .6, quality: 'standard' };
-const clockSignature = (draft: Draft) => JSON.stringify([draft.appearance, draft.layout.clock.enabled, draft.layout.clock.language, draft.layout.clock.seconds, draft.layout.clock.format, rows.map(k => { const r = draft.layout.clock.rows[k]; return [r.visible, r.label, r.text, r.size]; }), draft.deviceId]);
+const clockSignature = (draft: Draft) => JSON.stringify([draft.appearance, draft.layout.clock.enabled, draft.layout.clock.language, draft.layout.clock.seconds, draft.layout.clock.format, rows.map(k => { const r = draft.layout.clock.rows[k]; return [r.visible, r.label, r.text, r.size, r.language]; }), draft.deviceId]);
 const cleanError = (message: string) => message.replace(/^Error invoking remote method '[^']+': Error: /, '');
 type Tab = 'layout' | 'clock' | 'theme' | 'layers' | 'export';
+// 壁纸自带的时间模式（如“自选时间段”）会让画面不跟时钟走；开启随时间变化时把这类设置切到跟随现实时间。
+const timeSetting = /时间|时段|昼夜|time|day|night/i, realTime = /(现实|真实|系统|实际|当前)时间|跟随时间|随时间变化|real[\s-]?time|system time|current time|follow.*time/i;
+function realTimeChanges(properties: Property[], values: Record<string, unknown>) {
+  const changes: { key: string; value: unknown; text: string }[] = [];
+  for (const property of properties) {
+    if (!timeSetting.test(property.label)) continue;
+    const current = values[property.key] ?? property.value;
+    const option = property.type === 'combo' ? property.options?.find(option => realTime.test(option.label)) : undefined;
+    if (option && String(option.value) !== String(current)) changes.push({ key: property.key, value: option.value, text: `${property.label} → ${option.label}` });
+    if (property.type === 'bool' && realTime.test(property.label) && current !== true) changes.push({ key: property.key, value: true, text: `${property.label} → 开启` });
+  }
+  return changes;
+}
 
 /** 选择本地音乐后按左右声道各 64 段频谱推给渲染页，只用于预览音频响应效果 */
 function useAudioPreview(url: string, playing: boolean, send: (left: number[], right: number[]) => void) {
@@ -52,9 +66,9 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
   const [phase, setPhase] = useState('读取主题'), [busy, setBusy] = useState(true), [enhancing, setEnhancing] = useState(false), [error, setError] = useState('');
   const [fonts, setFonts] = useState<FontOption[]>([]), [propertySearch, setPropertySearch] = useState(''), [layerId, setLayerId] = useState('');
   const [templateName, setTemplateName] = useState(''), [naming, setNaming] = useState(false), [saving, setSaving] = useState(false);
-  const [patch, setPatch] = useState<LivePatch | null>(null), [liveReady, setLiveReady] = useState(false), [diagnostics, setDiagnostics] = useState<string[]>([]);
+  const [patch, setPatch] = useState<LivePatch | null>(null), [liveReady, setLiveReady] = useState(false), [liveInfo, setLiveInfo] = useState<LiveInfo | null>(null), [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [audioUrl, setAudioUrl] = useState(''), [dpr, setDpr] = useState(0), [loadMs, setLoadMs] = useState(0), [previewMinute, setPreviewMinute] = useState<number | null>(null);
-  const alive = useRef(true), latest = useRef<Draft | null>(null), clockRequest = useRef(0), previewRequest = useRef(0), complete = useRef(false);
+  const alive = useRef(true), latest = useRef<Draft | null>(null), clockRequest = useRef(0), previewRequest = useRef(0), complete = useRef(false), shownRoot = useRef<string | undefined>(undefined);
   const liveStage = useRef<LiveStageHandle>(null), screen = useRef<HTMLDivElement>(null), fontField = useRef<HTMLLabelElement>(null);
   const [focusFont, setFocusFont] = useState<RowKey | null>(null);
   useEffect(() => { localStorage.setItem('yingchuang-camera-mask', String(mask)); }, [mask]);
@@ -63,6 +77,8 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
   // full 为录制模式（实时完整画面），native 为图层模式（逐层转换并保留逐层感应）；默认图层模式。
   const mode: 'full' | 'native' = fullAvailable && (draft?.export?.mode === 'record' || !nativeAvailable) ? 'full' : 'native';
   const exportSettings: ExportSettings = { ...defaultExport, ...draft?.export };
+  // 场景壁纸两种模式都用实时渲染预览：图层模式由渲染页模拟手机的逐层感应，逐层烘焙只在导出时进行。
+  const liveView = mode === 'full' || (theme.type === 'scene' && fullAvailable);
   // 应用壁纸无法在页面中运行，预览显示封面，转换时启动程序录制窗口。
   const application = theme.type === 'application';
   useEffect(() => {
@@ -73,10 +89,11 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
     const ready = window.yingchuang.onPreviewReady(e => { if (e.id !== theme.id || e.requestId !== previewRequest.current || !alive.current) return; setEnhancing(false); if (e.error) { setError(e.error); return; } if (e.data) { complete.current = true; setPreview(p => ({ ...e.data!, clock: p?.clock ?? e.data!.clock, clockRoot: p?.clockRoot || e.data!.clockRoot })); } });
     return () => { alive.current = false; unsubscribe(); ready(); void window.yingchuang.cancelPreview(); };
   }, [theme.id]);
+  useEffect(() => { shownRoot.current = preview?.assetRoot; }, [preview?.assetRoot]);
   // 原生图层：由转换核心生成与导出一致的分层预览。
-  const graphicsKey = draft ? JSON.stringify([draft.properties, draft.layers, draft.layout.clock.enabled, draft.motion.fps]) : '';
+  const graphicsKey = draft ? JSON.stringify([draft.properties, draft.layers, draft.layout.clock.enabled, draft.motion.fps, draft.export?.timeVariation === true]) : '';
   useEffect(() => {
-    if (!draft || !data || mode !== 'native') return;
+    if (!draft || !data || mode !== 'native' || liveView) return;
     if (!nativeAvailable) { setBusy(false); setError(data.detail.reason || '此类主题的背屏转换尚未接入。'); return; }
     const serial = ++previewRequest.current; setError('');
     // 已有完整动效时，修改设置不换成静态快速预览，保留当前画面直到新动效补齐，避免编辑中途特效消失。
@@ -87,7 +104,12 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
       void window.yingchuang.preview(theme.id, snapshot, serial).then(async result => {
         if (!alive.current || serial !== previewRequest.current) return;
         if (keep && result.progressive) void window.yingchuang.previewMotion(theme.id, serial);
-        else { complete.current = !result.progressive; setPreview(result); setEnhancing(Boolean(result.progressive)); }
+        else {
+          complete.current = !result.progressive;
+          // 画布只在资源目录变化时报告就绪；快速预览与当前画面相同（如切换随时间变化）时直接请求完整动效。
+          if (result.progressive && result.assetRoot === shownRoot.current) void window.yingchuang.previewMotion(theme.id, serial);
+          setPreview(result); setEnhancing(Boolean(result.progressive));
+        }
         setError(result.clockError || '');
         if (clockSignature(snapshot) !== clockSignature(latest.current!)) {
           const update = await window.yingchuang.clock(theme.id, latest.current!); if (alive.current && serial === previewRequest.current) setPreview(p => p ? { ...p, ...update } : p);
@@ -95,28 +117,28 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
       }).catch(e => { if (alive.current && serial === previewRequest.current) { setBusy(false); if (!e.message.includes('已取消')) setError(e.message); } });
     }, preview && preview.layers.length ? 600 : 0);
     return () => clearTimeout(timer);
-  }, [graphicsKey, Boolean(data), mode]);
-  // 完整画面：画面来自实时渲染页，转换核心只负责时钟字形。
+  }, [graphicsKey, Boolean(data), mode, liveView]);
+  // 实时画面：画面来自实时渲染页，转换核心只负责时钟字形。
   useEffect(() => {
     complete.current = false;
-    if (!data || mode !== 'full') return;
+    if (!data || !liveView) return;
     ++previewRequest.current; void window.yingchuang.cancelPreview();
-    setEnhancing(false); setBusy(!application); setError(''); setPhase('载入完整画面'); setDiagnostics(application ? ['应用壁纸会在转换时启动并录制窗口画面，预览显示封面。'] : []);
+    setEnhancing(false); setBusy(!application); setError(''); setPhase('载入画面'); setDiagnostics(application ? ['应用壁纸会在转换时启动并录制窗口画面，预览显示封面。'] : []);
     setPreview(p => ({ width: data.live.sceneSize[0], height: data.live.sceneSize[1], title: theme.title, layers: [], restored: [], notes: [], assetRoot: 'live:' + theme.id,
       clockRoot: p?.clockRoot || '', clock: p?.clock || null, config: p?.config || {} }));
-  }, [mode, Boolean(data)]);
+  }, [liveView, Boolean(data)]);
   const layersKey = draft ? JSON.stringify(draft.layers) : '';
   useEffect(() => {
-    if (!draft || mode !== 'full') return;
+    if (!draft || !liveView) return;
     const timer = setTimeout(() => void window.yingchuang.livePatch(theme.id, latest.current!).then(value => { if (alive.current) setPatch(value); }).catch(e => setError(e.message)), patch ? 260 : 0);
     return () => clearTimeout(timer);
-  }, [layersKey, mode]);
-  const clockKey = draft ? clockSignature(draft) + mode : '';
+  }, [layersKey, liveView]);
+  const clockKey = draft ? clockSignature(draft) + liveView : '';
   useEffect(() => {
     if (!draft || !preview) return;
     const serial = ++clockRequest.current;
     const timer = setTimeout(() => {
-      void window.yingchuang.clock(theme.id, latest.current!).then(result => { if (alive.current && serial === clockRequest.current) { setPreview(p => p ? { ...p, ...result } : p); if (mode === 'full') setError(''); } })
+      void window.yingchuang.clock(theme.id, latest.current!).then(result => { if (alive.current && serial === clockRequest.current) { setPreview(p => p ? { ...p, ...result } : p); if (liveView) setError(''); } })
         .catch(e => { if (alive.current && serial === clockRequest.current) setError(e.message); });
     }, 450);
     return () => clearTimeout(timer);
@@ -136,6 +158,21 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
   const update = (fn: (d: Draft) => void) => setDraft(old => { if (!old) return old; const d = structuredClone(old); fn(d); return d; });
   const updateLayout = (layout: Layout) => update(d => { d.layout = layout; });
   const updateExport = (patch: Partial<ExportSettings>) => update(d => { d.export = { ...defaultExport, ...d.export, ...patch }; });
+  // 按时间导出第一次打开时先弹说明，确认一次后记在设置里，以后直接切换。
+  const [timeNotice, setTimeNotice] = useState(false);
+  const timeNoticeDialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (timeNotice) timeNoticeDialog.current?.showModal(); else timeNoticeDialog.current?.close(); }, [timeNotice]);
+  const timeVariation = draft?.export?.timeVariation === true;
+  const enableTimeVariation = () => {
+    const changes = data && draft ? realTimeChanges(data.properties, draft.properties) : [];
+    update(d => { d.export = { ...defaultExport, ...d.export, timeVariation: true }; for (const change of changes) d.properties[change.key] = change.value; });
+    if (changes.length) onToast(`已把壁纸的时间设置改为跟随现实时间：${changes.map(change => change.text).join('；')}`, 'info');
+  };
+  const toggleTimeVariation = (on: boolean) => {
+    if (on && !state.settings.timeVariationNotice) { setTimeNotice(true); return; }
+    if (on) enableTimeVariation(); else { updateExport({ timeVariation: false }); setPreviewMinute(null); }
+  };
+  const confirmTimeVariation = async () => { setTimeNotice(false); enableTimeVariation(); onState(await window.yingchuang.settings({ timeVariationNotice: true })); };
   const device = state.devices.find(d => d.id === draft?.deviceId) || state.devices[state.devices.length - 1];
   const row = selected || 'time', widget = definitions.widgets.find(widget => widget.key === row)!;
   const sourceNote = definitions.sources[widget.category as keyof typeof definitions.sources]?.note;
@@ -156,8 +193,8 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
     };
     document.addEventListener('keydown', listener); return () => document.removeEventListener('keydown', listener);
   }, [draft]);
-  const liveLoad: LiveLoad | null = useMemo(() => data && draft && patch && dpr && mode === 'full'
-    ? { theme: data.live.theme, properties: draft.properties, patch, playing, dpr } : null, [data, draft?.properties, patch, mode, dpr]);
+  const liveLoad: LiveLoad | null = useMemo(() => data && draft && patch && dpr && liveView
+    ? { theme: data.live.theme, properties: draft.properties, patch, playing, dpr } : null, [data, draft?.properties, patch, liveView, dpr]);
   useAudioPreview(mode === 'full' ? audioUrl : '', playing, (left, right) => liveStage.current?.audio(left, right));
   const recording = useMemo(() => {
     if (!draft || !data) return null;
@@ -167,12 +204,12 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
     return { ...size, frames, megabytes: Math.max(.5, exportSettings.duration * 3.2 / 8 * size.width * size.height / 613000 * exportSettings.fps / 30) };
   }, [draft?.layout, draft?.motion, device, exportSettings.duration, exportSettings.fps, data]);
   const canConvert = mode === 'full' ? fullAvailable : nativeAvailable;
-  // 随时段变化的图层带透明度关键点；有它们时显示预览时刻滑杆。
-  const timed = mode === 'native' && Boolean(preview?.layers.some(layer => layer.time));
-  const timeInfo = preview?.details?.['时段变化'] as { 对象数?: number; 变体数?: number } | undefined;
+  // 透明度变体与变换曲线都按所选的预览时刻播放。
+  // 时间预览与“随时间变化”开关是同一功能：图层模式下开关打开就显示时间条。
+  const timed = mode === 'native' && timeVariation;
   const now = new Date(), nowMinute = Math.floor((now.getHours() * 60 + now.getMinutes()) / 15) * 15;
   const clockText = (minute: number) => `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
-  const notes = mode === 'full' ? diagnostics : preview?.notes || [];
+  const notes = liveView ? diagnostics : preview?.notes || [];
   const fontWarnings = preview?.clock?.warnings || [];
   const noteCount = notes.length + fontWarnings.length;
   const tabs = [{ value: 'layout', label: '排版', icon: <LayoutTemplate size={14}/> }, { value: 'clock', label: '组件', icon: <LayoutGrid size={14}/> }, { value: 'theme', label: '主题', icon: <SlidersHorizontal size={14}/> }, { value: 'layers', label: '图层', icon: <Layers size={14}/> }, { value: 'export', label: '导出', icon: <ArrowDownToLine size={14}/> }] as const;
@@ -183,22 +220,30 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
       <div className="editor-body"><div className="preview-panel">
         <div className="preview-glow" style={{ backgroundImage: `url("${theme.preview}")` }}/>
         <div className="preview-heading">
-          {fullAvailable && nativeAvailable ? <Segmented label="转换方式" value={mode} onChange={value => updateExport({ mode: value === 'full' ? 'record' : 'layers' })} options={[{ value: 'native', label: '图层模式', icon: <Layers size={13}/>, title: '逐层转换，背屏上每层独立感应视差，特效逐层完整渲染' }, { value: 'full', label: '录制模式', icon: <Clapperboard size={13}/>, title: '录制完整画面为循环视频，整幅随感应平移' }]}/>
-            : <span className="type-chip">{mode === 'full' ? <><Clapperboard size={11}/>录制模式</> : theme.type === 'video' ? <><Clapperboard size={11}/>视频转码</> : <><Layers size={11}/>图层模式</>}</span>}
+          <div className="heading-modes">
+            {fullAvailable && nativeAvailable ? <Segmented label="转换方式" value={mode} onChange={value => updateExport({ mode: value === 'full' ? 'record' : 'layers' })} options={[{ value: 'native', label: '图层模式', icon: <Layers size={13}/>, title: '逐层转换，背屏上每层独立感应视差，特效逐层完整渲染' }, { value: 'full', label: '录制模式', icon: <Clapperboard size={13}/>, title: '录制完整画面为循环视频，整幅随感应平移' }]}/>
+              : <span className="type-chip">{mode === 'full' ? <><Clapperboard size={11}/>录制模式</> : theme.type === 'video' ? <><Clapperboard size={11}/>视频转码</> : <><Layers size={11}/>图层模式</>}</span>}
+            {theme.type === 'scene' && mode === 'native' && <Glass className="segmented-control time-toggle" title="开启后在一天中 8 个时刻分别渲染，背屏按系统时间切换画面，预览下方可拖动时间条查看各时段；导出时间和包体会增加">
+              <div className="segment-track">
+                {timeVariation && <span className="segment-indicator" style={{ width: '100%' }}/>}
+                <button type="button" role="switch" aria-checked={timeVariation} aria-label="随时间变化（实验）" className={timeVariation ? 'active' : ''} onClick={() => toggleTimeVariation(!timeVariation)}><Clock3 size={13}/><span>随时间变化</span><small>实验</small></button>
+              </div>
+            </Glass>}
+          </div>
           <div className="device-compact"><Select aria-label="适配机型" value={device.id} onChange={e => update(d => { d.deviceId = e.target.value; })}>{state.devices.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</Select><span>{device.width} × {device.height}</span></div>
         </div>
         <div className="preview-stage"><div className="device-frame" style={{ '--screen-ratio': device.width / device.height } as React.CSSProperties}>
-          <div className="screen" ref={screen} style={{ borderRadius: `${device.cornerRadius / device.width * 100}% / ${device.cornerRadius / device.height * 100}%`, backgroundImage: mode === 'full' && !liveReady ? `url("${theme.preview}")` : undefined }}>
-            {mode === 'full' && data && !application && <LiveStage ref={liveStage} renderer={data.live.renderer} load={liveLoad} playing={playing}
-              onReady={(_info, ms) => { setLiveReady(true); setBusy(false); setLoadMs(ms); }} onError={message => { setBusy(false); setError(message); }}
+          <div className="screen" ref={screen} style={{ borderRadius: `${device.cornerRadius / device.width * 100}% / ${device.cornerRadius / device.height * 100}%`, backgroundImage: liveView && !liveReady ? `url("${theme.preview}")` : undefined }}>
+            {liveView && data && !application && <LiveStage ref={liveStage} renderer={data.live.renderer} load={liveLoad} playing={playing} minute={timed ? previewMinute : null}
+              onReady={(info, ms) => { setLiveReady(true); setLiveInfo(info); setBusy(false); setLoadMs(ms); }} onError={message => { setBusy(false); setError(message); }}
               onDiagnostic={message => setDiagnostics(old => old.includes(message) || old.length > 30 ? old : [...old, message])}/>}
             {mode === 'full' && application && <div className="live-frame live-poster" data-live-frame="" style={{ backgroundImage: `url("${theme.preview}")` }}/>}
             {draft ? <PreviewCanvas preview={preview} draft={draft} device={device} poster={theme.preview} playing={playing} tilt={tilt} mask={mask} selected={selected}
-              live={mode === 'full' ? { ready: liveReady || application } : undefined} minute={previewMinute}
+              live={liveView ? { ready: liveReady || application, layered: mode === 'native', motion: liveInfo?.maxMotion ?? 1, parallax: (x, y) => liveStage.current?.parallax(x, y) } : undefined} minute={previewMinute}
               onSelect={key => { setSelected(key); if (key) setTab('clock'); }} onLayout={updateLayout} onError={message => { setBusy(false); setError(message); }}
               onReady={() => { setBusy(false); if (preview?.progressive) void window.yingchuang.previewMotion(theme.id, previewRequest.current); }}/> : <img src={theme.preview} alt=""/>}
             {(busy || enhancing) && <div className="preview-status"><LoaderCircle size={13} className="spin"/>{busy ? phase : complete.current ? `正在更新${/逐层渲染/.test(phase) ? ' · ' + phase : '预览'}` : /逐层渲染/.test(phase) ? phase + '，可继续编辑' : '正在补齐动效，可继续编辑'}</div>}
-            <div className="preview-badge">{mode === 'full' ? '录制模式' : '图层模式'} · {device.width}×{device.height}{mode === 'full' && loadMs ? ` · ${loadMs} ms` : ''}</div>
+            <div className="preview-badge">{mode === 'full' ? '录制模式' : '图层模式'} · {device.width}×{device.height}{liveView && loadMs ? ` · ${loadMs} ms` : ''}</div>
           </div>
         </div></div>
         <Glass className="preview-tools"><div><button className={`icon-button ${!playing ? 'active' : ''}`} aria-label={playing ? '暂停动效' : '播放动效'} title="播放 / 暂停（空格）" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={17}/> : <Play size={17}/>}</button><span className="tool-divider"/><button className={`tool-button ${!tilt ? 'active' : ''}`} onClick={() => setTilt(false)}><Move size={15}/><span>排版</span></button><button className={`tool-button ${tilt ? 'active' : ''}`} onClick={() => setTilt(true)}><MousePointer2 size={15}/><span>感应</span></button><button className={`tool-button ${mask ? 'active' : ''}`} onClick={() => setMask(!mask)}><ScanEye size={15}/><span>避让区域</span></button>
@@ -226,7 +271,10 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
               update(d => { d.layout.clock.enabled = v; if (initialFont) for (const key of ['week', 'date', 'time']) if (!d.appearance.fonts[key]) d.appearance.fonts[key] = initialFont; });
             }}/>
             </div>
-            <div className="widget-categories">{definitions.categories.map(category => <div className="widget-category" key={category.key}><h3>{category.name}</h3><div className="widget-grid">{definitions.widgets.filter(widget => widget.category === category.key).map(widget => { const visible = draft.layout.clock.rows[widget.key].visible, Icon = widgetIcons[widget.key]; return <button key={widget.key} className={`widget-card ${visible ? 'is-visible' : ''} ${row === widget.key ? 'is-selected' : ''}`} aria-label={`编辑${widget.name}组件`} aria-pressed={visible} onClick={() => { setSelected(widget.key); if (!visible) update(d => { d.layout.clock.rows[widget.key].visible = true; }); }}><Icon size={16}/><span>{widget.name}</span>{visible && <Check size={11}/>}</button>; })}</div></div>)}</div>
+            <div className="widget-categories">{definitions.categories.map(category => <div className="widget-category" key={category.key}><h3>{category.name}</h3><div className="widget-grid">{definitions.widgets.filter(widget => widget.category === category.key).map(widget => { const visible = draft.layout.clock.rows[widget.key].visible, Icon = widgetIcons[widget.key]; return <button key={widget.key} className={`widget-card ${visible ? 'is-visible' : ''} ${row === widget.key ? 'is-selected' : ''}`} aria-label={`编辑${widget.name}组件`} aria-pressed={visible} onClick={() => {
+                if (row === widget.key && visible) { update(d => { d.layout.clock.rows[widget.key].visible = false; }); return; }
+                setSelected(widget.key); if (!visible) update(d => { d.layout.clock.rows[widget.key].visible = true; });
+              }}><Icon size={16}/><span>{widget.name}</span>{visible && <Check size={11}/>}</button>; })}</div></div>)}</div>
             <div className="inspector-section widget-settings"><div className="section-title">{widget.name}</div><>
                 <Toggle label={`显示${rowNames[row]}`} checked={draft.layout.clock.rows[row].visible} onChange={v => update(d => { d.layout.clock.rows[row].visible = v; })}/>
                 <div className="two-fields"><label>横向位置<input aria-label={`${rowNames[row]}横向位置`} type="number" min={0} max={100} value={Number((draft.layout.clock.rows[row].x * 100).toFixed(1))} onChange={e => update(d => { d.layout.clock.rows[row].x = Number(e.target.value) / 100; })}/></label><label>纵向位置<input aria-label={`${rowNames[row]}纵向位置`} type="number" min={0} max={100} value={Number((draft.layout.clock.rows[row].y * 100).toFixed(1))} onChange={e => update(d => { d.layout.clock.rows[row].y = Number(e.target.value) / 100; })}/></label></div>
@@ -237,7 +285,7 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
                 {widget.format && <Toggle label="显示单位与标签" checked={draft.layout.clock.rows[row].label !== false} onChange={v => update(d => { d.layout.clock.rows[row].label = v; })}/>}
                 {row === 'text' && <label className="stack-field"><span>自定义文字</span><input aria-label="自定义文字" maxLength={40} value={draft.layout.clock.rows[row].text} onChange={e => update(d => { d.layout.clock.rows[row].text = [...e.target.value].slice(0, 40).join(''); })}/></label>}
                 {sourceNote && <div className="hint widget-source"><Info size={13}/>{sourceNote}</div>}
-                {row === 'week' && <label className="stack-field"><span>星期语言</span><Select aria-label="星期语言" value={draft.layout.clock.language} onChange={e => update(d => { d.layout.clock.language = e.target.value as 'en' | 'zh'; })}><option value="en">英文</option><option value="zh">中文</option></Select></label>}
+                {widget.lang && <label className="stack-field"><span>语言</span><Select aria-label={`${rowNames[row]}语言`} value={draft.layout.clock.rows[row].language} onChange={e => update(d => { d.layout.clock.rows[row].language = e.target.value as 'en' | 'zh'; })}><option value="zh">中文</option><option value="en">英文</option></Select></label>}
                 {row === 'time' && <><label className="stack-field"><span>时间格式</span><Select aria-label="时间格式" value={draft.layout.clock.format} onChange={e => update(d => { d.layout.clock.format = e.target.value as 'auto' | '24' | '12'; })}><option value="auto">跟随主题</option><option value="24">24 小时</option><option value="12">12 小时</option></Select></label><Toggle label="显示秒数" checked={draft.layout.clock.seconds} onChange={v => update(d => { d.layout.clock.seconds = v; })}/></>}
               </>
               {mode === 'full' && (data.detail.clockLayerIds?.length || 0) > 0 && <div className="hint"><Info size={13}/>原主题的时钟文字已隐藏，由背屏时钟实时显示，避免录制时把某一刻的时间固定在画面里。</div>}
@@ -255,7 +303,7 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
               <Segmented glass={false} label="导出画质" value={exportSettings.quality} onChange={quality => updateExport({ quality })} options={[{ value: 'compact', label: '省空间' }, { value: 'standard', label: '标准' }, { value: 'high', label: '高清' }]}/>
               <div className="hint"><Info size={13}/>按背屏 {device.width}×{device.height} 的实际显示尺寸缩小贴图与视频，并裁掉屏幕和感应留边以外的部分。标准与屏幕像素一一对应；高清保留 1.5 倍细节；省空间约为 0.75 倍。</div>
             </div>
-            {mode === 'native' && timed && <div className="hint"><Clock3 size={13}/>这张壁纸随现实时间变化{timeInfo?.变体数 ? `，共 ${timeInfo.变体数} 种时段画面` : ''}。导出后背屏按系统时间切换，渐变时段保留过渡；可在预览工具条拖动“预览时刻”查看各时段。</div>}
+            {timed && <div className="hint"><Clock3 size={13}/>已开启随时间变化。导出后背屏按系统时间切换；拖动预览下方的时间条查看各时段。</div>}
             {mode === 'full' && <div className="inspector-section">
               <div className="section-title">录制</div>
               <Slider label="循环时长" value={exportSettings.duration} min={2} max={30} suffix=" 秒" onChange={v => updateExport({ duration: v })}/>
@@ -265,12 +313,23 @@ export function Editor({ theme, state, onClose, onState, onConvert, onToast }: {
               {exportSettings.loop && <Slider label="过渡时长" value={exportSettings.fade} min={.1} max={2} step={.1} digits={1} suffix=" 秒" onChange={v => updateExport({ fade: v })}/>}
               {recording && <div className="estimate"><span>{recording.width} × {recording.height}</span><span>{recording.frames} 帧 · 约 {recording.megabytes.toFixed(1)} MB</span></div>}
             </div>}
-            <div className="hint"><Info size={13}/>{mode === 'full' ? '录制画面包含感应留边，倾斜手机时整幅画面平移。音频响应、鼠标交互与随现实时间变化的画面按录制时刻固定，需要随时段变化请使用图层模式。' : '每层动画按 4 秒循环烘焙，背屏系统逐层绘制并分别响应感应。全屏后期类效果无法拆到图层，记录在转换报告中。'}</div>
+            <div className="hint"><Info size={13}/>{mode === 'full' ? '录制画面包含感应留边，倾斜手机时整幅画面平移。音频响应、鼠标交互与随现实时间变化的画面按录制时刻固定，需要随时段变化请使用图层模式。' : '每层动画按自身的循环周期烘焙（12 秒内找不到周期的按 4 秒首尾过渡），背屏系统逐层绘制并分别响应感应。全屏后期类效果无法拆到图层，记录在转换报告中。'}</div>
           </>}
         </div>}
       </aside></div>
       <footer className="editor-footer"><div className="footer-left">{naming ? <form className="template-name" onSubmit={async e => { e.preventDefault(); if (!draft) return; onState(await window.yingchuang.saveTemplate(templateName || '我的排版', draft.layout)); setNaming(false); onToast('排版模板已保存'); }}><input autoFocus aria-label="模板名称" placeholder="模板名称" value={templateName} onChange={e => setTemplateName(e.target.value)}/><button type="submit" className="icon-button" aria-label="保存模板"><Check size={17}/></button><button type="button" className="icon-button" aria-label="取消保存模板" onClick={() => setNaming(false)}><X size={15}/></button></form> : <button className="text-button" disabled={!draft} onClick={() => setNaming(true)}><Save size={15}/>保存排版模板</button>}</div>
         <div className="footer-actions"><button className="button secondary" disabled={!draft || saving} onClick={() => void finish()}>完成</button><button className="button primary" disabled={!draft || saving || !canConvert} onClick={() => void finish(true)}>{saving ? <LoaderCircle className="spin" size={16}/> : mode === 'full' ? <Sparkles size={16}/> : <ArrowDownToLine size={16}/>}转换壁纸</button></div></footer>
     </Glass>
+    <dialog ref={timeNoticeDialog} className="updater-overlay time-notice" aria-labelledby="time-notice-title" onCancel={event => { event.preventDefault(); setTimeNotice(false); }}>
+      <Glass className="updater-dialog" refraction={false}>
+        <header className="update-header"><div className="update-emblem"><Clock3 size={23}/></div><div><h2 id="time-notice-title">随时间变化（实验）</h2></div></header>
+        <div className="update-body update-notes">
+          <p>开启后，导出时在一天中的 8 个时刻（1:30、4:30、7:30、10:30、13:30、16:30、19:30、22:30）分别渲染壁纸，背屏按系统时间切换到对应画面。</p>
+          <p>两个时刻之间的切换时间按壁纸脚本推算，推算不出时取中间时刻；短于 3 小时的时段可能采不到。</p>
+          <p>导出时间和包体会增加。</p>
+        </div>
+        <footer className="update-footer"><div className="update-actions update-actions-end"><button className="button secondary" onClick={() => setTimeNotice(false)}>取消</button><button className="button primary" onClick={() => void confirmTimeVariation()}>开启</button></div></footer>
+      </Glass>
+    </dialog>
   </div>;
 }

@@ -45,3 +45,11 @@
   .update-actions { flex-wrap: wrap; justify-content: flex-end; }
   .update-actions > div:first-child { margin-right: auto; }
 }
+.update-manual-downloads { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin: -6px 0 14px; color: var(--text-3); font-size: 12px; }
+.update-actions.update-actions-end { justify-content: flex-end; }
+/* 长文字对话框（更新公告、发现新版本、随时间变化说明）：底色接近不透明，背后壁纸再鲜艳也不影响阅读。
+   选择器带上 .updater-overlay，优先级高于液态、磨砂两种材质对玻璃底色的设置。 */
+:root { --dialog-surface: linear-gradient(150deg, rgba(251, 252, 255, .95), rgba(243, 246, 251, .92)); }
+:root[data-scheme=dark] { --dialog-surface: linear-gradient(150deg, rgba(36, 42, 56, .96), rgba(25, 29, 39, .94)); }
+:root .updater-overlay .glass.updater-dialog > .glass-backdrop { background: var(--dialog-surface); -webkit-backdrop-filter: blur(40px) saturate(1.2); backdrop-filter: blur(40px) saturate(1.2); }
+.updater-overlay::backdrop { -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }

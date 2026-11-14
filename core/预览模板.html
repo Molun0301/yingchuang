@@ -196,17 +196,19 @@ function renderScene(ms, date, tiltX, tiltY) {
   const minute = date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
   for (const layer of scene.layers) {
     let alpha = layer.fade?.length ? interpolate(layer.fade, ms)[0] / 255 : 1;
-    // 视频在权重过半时显示，图片按权重渐变。
-    if (layer.time) { const weight = timeWeight(layer.time, minute); alpha *= layer.video ? (weight > .5 ? 1 : 0) : weight; }
+    const curve = Object.fromEntries(Object.entries(layer.curve || {}).map(([key, points]) => [key, timeWeight(points, minute)]));
+    // 视频在时段权重过半时显示（与背屏一致），图片按权重渐变。
+    const weight = (layer.time ? timeWeight(layer.time, minute) : 1) * (curve.alpha ?? 1);
+    alpha *= layer.video ? (weight > .5 ? 1 : 0) : weight;
     if (alpha <= 0) continue;
     const [px, py] = layer.travel?.length ? interpolate(layer.travel, ms) : [0, 0];
-    const x = sceneLeft + (layer.x + px) * scale + tiltX * canvas.width * config['感应幅度'] * layer.motion;
-    const y = sceneTop + (layer.y + py) * scale + tiltY * canvas.height * config['感应幅度'] * layer.motion * config['纵向感应比例'];
-    const w = layer.w * scale, h = layer.h * scale;
+    const x = sceneLeft + (layer.x + px + (curve.dx ?? 0)) * scale + tiltX * canvas.width * config['感应幅度'] * layer.motion;
+    const y = sceneTop + (layer.y + py + (curve.dy ?? 0)) * scale + tiltY * canvas.height * config['感应幅度'] * layer.motion * config['纵向感应比例'];
+    const w = layer.w * scale * (curve.sx ?? 1), h = layer.h * scale * (curve.sy ?? 1);
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.translate(x, y);
-    ctx.rotate(layer.rotation * Math.PI / 180);
+    ctx.rotate((layer.rotation + (curve.rot ?? 0)) * Math.PI / 180);
     const video = videos.get(layer.id);
     ctx.drawImage(video && video.readyState >= 2 ? video : images.get(layerImage(layer, ms, tiltX)), -w / 2, -h / 2, w, h);
     ctx.restore();

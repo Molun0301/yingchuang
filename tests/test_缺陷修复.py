@@ -44,6 +44,25 @@ def test_scalar_parent_scale_keeps_children_and_checkbox_parallax():
     assert worlds[2]['depth']==1
 
 
+@pytest.mark.parametrize('parent_alpha',[0,.5])
+@pytest.mark.parametrize('parent_visible',[True,False])
+def test_parent_alpha_is_local_but_color_and_visibility_reach_descendants(parent_alpha,parent_visible):
+    objects=[{'id':183,'origin':'10 20 0','scale':.5,'alpha':parent_alpha,'color':'.5 .25 1','visible':parent_visible},
+             {'id':23,'parent':183,'origin':'4 6 0','alpha':.8,'color':'.8 1 .5'},
+             {'id':24,'parent':23,'origin':'2 4 0','alpha':.6,'color':'.5 .8 1'}]
+    notes=[];worlds=converter.world_transforms(objects,{},100,100,notes)
+    assert notes==[]
+    if not parent_visible:
+        assert worlds=={183:None,23:None,24:None}
+    else:
+        assert worlds[183]['alpha']==parent_alpha
+        assert worlds[23]['alpha']==.8 and worlds[24]['alpha']==.6
+        assert worlds[23]['color']==pytest.approx([.4,.25,.5])
+        assert worlds[24]['color']==pytest.approx([.2,.2,.5])
+        assert worlds[23]['matrix']==(.5,0,0,.5,12,23)
+        assert worlds[24]['matrix']==(.5,0,0,.5,13,25)
+
+
 def test_engine_font_is_visible_to_theme_font_resolver(tmp_path):
     theme=tmp_path/'主题';theme.mkdir();(theme/'scene.json').write_text('{}')
     engine=tmp_path/'引擎';(engine/'fonts').mkdir(parents=True)

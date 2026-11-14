@@ -56,4 +56,19 @@ async function sceneEvaluator(input,{timeout=1500}={}){
     dispose(){vm.dispose();runtime.dispose();},
   };
 }
-module.exports={evaluateScene,sceneEvaluator,scriptInput};
+/** 只固化被其他图层控制的状态；对象自身的脚本和时间轴仍交给完整渲染器。 */
+function sceneState(original,resolved,ids){
+  const raw=new Map(original.objects.map(object=>[object.id,object]));
+  const objects=new Map(resolved.objects.map(object=>[object.id,object]));
+  const bound=value=>value&&typeof value==='object'&&('script'in value||'animation'in value||Object.values(value).some(bound));
+  const state={};
+  for(const id of ids)for(let object=objects.get(id);object&&!state[object.id];object=objects.get(object.parent)){
+    const fields={};state[object.id]=fields;
+    for(const key of ['visible','alpha','color','origin','scale','angles','brightness','text']){
+      if(!(key in object)||bound(raw.get(object.id)?.[key]))continue;
+      const value=object[key];fields[key]=value&&typeof value==='object'&&'value'in value?value.value:value;
+    }
+  }
+  return state;
+}
+module.exports={evaluateScene,sceneEvaluator,scriptInput,sceneState};

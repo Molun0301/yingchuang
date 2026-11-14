@@ -10,6 +10,7 @@ const { promisify } = require('node:util');
 
 const RELEASES = 'https://api.github.com/repos/Molun0301/yingchuang/releases/latest';
 const RELEASE_PAGE = 'https://github.com/Molun0301/yingchuang/releases/latest';
+const QUARK_DOWNLOAD = 'https://pan.quark.cn/s/320e0f140cf6';
 const run = promisify(execFile);
 
 // 先比较主版本，再按语义化版本规则比较预发布标识；构建标识不参与排序。
@@ -51,10 +52,32 @@ function installUpdater({ store, handle, notify }) {
   const directory = path.join(app.getPath('userData'), 'updates');
   const canInstall = process.platform === 'win32' || (process.platform === 'linux' && Boolean(process.env.APPIMAGE));
   let release, downloaded, controller;
-  const settings = () => ({ auto: true, skipVersion: '', lastCheck: 0, ...store.data.settings.update });
+  const settings = () => ({ auto: true, skipVersion: '', lastCheck: 0, seenVersion: '', ...store.data.settings.update });
   const saveSettings = patch => { store.update(data => { data.settings.update = { ...settings(), ...patch }; }); };
   const send = event => notify('update', event);
   const status = () => ({ current, canInstall, settings: settings() });
+  const freshInstall = !store.data.settings.outputDirectory;
+  let needsChangelog = !freshInstall && (!settings().seenVersion || compareVersions(current, settings().seenVersion) > 0);
+  if (freshInstall) saveSettings({ seenVersion: current });
+
+  async function changelog() {
+    if (!needsChangelog) return null;
+    needsChangelog = false;
+    let notes = null;
+    try {
+      const response = await net.fetch(`https://api.github.com/repos/Molun0301/yingchuang/releases/tags/v${current}`, {
+        headers: { 'User-Agent': `yingchuang/${current}`, Accept: 'application/vnd.github+json' },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.body) notes = { version: current, notes: data.body, url: data.html_url, publishedAt: data.published_at };
+      }
+    } catch { /* 网络不可用时读取下载更新时保存的同版本公告。 */ }
+    const pending = settings().pendingNotes;
+    if (!notes && pending?.version === current && pending.notes) notes = pending;
+    saveSettings({ seenVersion: current });
+    return notes;
+  }
 
   async function check() {
     const response = await net.fetch(RELEASES, { headers: { 'User-Agent': `yingchuang/${current}`, Accept: 'application/vnd.github+json' } });
@@ -97,6 +120,7 @@ function installUpdater({ store, handle, notify }) {
       if (`sha256:${hash.digest('hex')}` !== asset.digest.toLowerCase()) throw new Error('下载文件校验失败，请重新下载。');
       await fs.rename(temp, file);
       progress(true);
+      saveSettings({ pendingNotes: { version: selected.latest, notes: selected.notes, url: selected.url, publishedAt: selected.publishedAt } });
       downloaded = { path: file, version: selected.latest, canInstall };
       send({ type: 'downloaded', download: downloaded });
       return downloaded;
@@ -140,6 +164,7 @@ function installUpdater({ store, handle, notify }) {
   }
 
   handle('update-check', check);
+  handle('update-changelog', changelog);
   handle('update-download', download);
   handle('update-cancel', () => { controller?.abort(); });
   handle('update-install', install);
@@ -149,7 +174,7 @@ function installUpdater({ store, handle, notify }) {
   });
   handle('open-release', url => {
     const target = url || RELEASE_PAGE;
-    if (!target.startsWith('https://github.com/')) throw new Error('仅支持打开 GitHub 发布页。');
+    if (!target.startsWith('https://github.com/') && target !== QUARK_DOWNLOAD) throw new Error('仅支持打开 GitHub 发布页或夸克网盘。');
     return shell.openExternal(target);
   });
   const timer = setTimeout(async () => {

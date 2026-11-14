@@ -55,14 +55,22 @@ def poster(source,output):
     if result.returncode:raise ValueError("无法读取视频画面。"+result.stderr.decode(errors="replace")[-200:])
 
 
-def encode(source,output,fps=30,speed=1,event=None):
+def encode(source,output,fps=30,speed=1,event=None,luts=()):
+    if luts:
+        from 调色查表 import lut3d_filters
+        with tempfile.TemporaryDirectory(prefix="查色表-",dir=Path(output).parent) as directory:
+            return _encode(source,output,fps,speed,event,lut3d_filters(luts,directory))
+    return _encode(source,output,fps,speed,event)
+
+
+def _encode(source,output,fps,speed,event,filters=()):
     info=metadata(source)
     duration=max(1,float(info.get("duration") or 1)/max(.25,float(speed)))
     # 小米视频元素限制单文件小于 50 MB，预留封装余量。
     bitrate=max(80000,min(3500000,int(44*1024*1024*8/duration)-96000))
     audio_filters="atempo=0.5,atempo="+str(speed/.5) if speed<.5 else "atempo="+str(speed)
     command=[imageio_ffmpeg.get_ffmpeg_exe(),"-hide_banner","-loglevel","error","-y","-i",str(source),
-             "-map","0:v:0","-map","0:a?","-vf",f"setpts=PTS/{speed},fps={int(fps)},scale='min(1600,iw)':-2",
+             "-map","0:v:0","-map","0:a?","-vf",",".join([*filters,f"setpts=PTS/{speed},fps={int(fps)},scale='min(1600,iw)':-2"]),
              *encoder_args(preset="fast"),"-c:a","aac","-b:a","96k","-af",audio_filters,
              "-b:v",str(bitrate),"-maxrate",str(bitrate),"-bufsize",str(bitrate*2),"-pix_fmt","yuv420p",
              "-movflags","+faststart","-progress","pipe:1",str(output)]

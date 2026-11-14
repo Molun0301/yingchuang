@@ -7,7 +7,7 @@ const DEFAULT_LAYOUT = {
   scale: 1.06, x: 0.5, y: 0.5, flip: false,
   clock: { enabled: true, language: 'en', format: 'auto', seconds: false,
     rows: Object.fromEntries(widgets.map(({key,core,x,y,size,align,sample}) => [key,
-      { visible: Boolean(core), x, y, size, align, label: true, ...(key === 'text' ? {text:sample} : {}) }])) },
+      { visible: Boolean(core), x, y, size, align, label: true, language: key === 'week' ? 'en' : 'zh', ...(key === 'text' ? {text:sample} : {}) }])) },
 };
 const clone = value => structuredClone(value);
 // 导出方式：layers 图层模式（默认）、record 录制模式；后几项是录制时长（秒）、帧率、首尾交叉淡化（秒）。
@@ -35,6 +35,7 @@ function cleanLayout(input = {}) {
   for (const key of ROWS) {
     const row = clock.rows?.[key] || {};
     const target = layout.clock.rows[key];
+    target.language = ['en', 'zh'].includes(row.language) ? row.language : key === 'week' ? layout.clock.language : 'zh';
     target.x = bounded(row.x, target.x, 0, 1);
     target.y = bounded(row.y, target.y, 0, 1);
     target.size = bounded(row.size, target.size, 10, 180);
@@ -56,8 +57,10 @@ function templateLayout(layout) {
 function applyTemplate(draft, template) {
   const result = clone(draft);
   const input = template.layout || template;
+  const current = cleanLayout(draft.layout);
+  const rows = Object.fromEntries(ROWS.map(key => [key, { ...(input.rows?.[key] ?? current.clock.rows[key]), language: current.clock.rows[key].language }]));
   result.layout = cleanLayout({ ...draft.layout, scale: input.scale, x: input.x, y: input.y,
-    clock: { ...draft.layout.clock, enabled:input.clockEnabled??draft.layout.clock.enabled, rows: { ...draft.layout.clock.rows, ...input.rows } } });
+    clock: { ...draft.layout.clock, enabled:input.clockEnabled??draft.layout.clock.enabled, rows } });
   return result;
 }
 

@@ -17,6 +17,27 @@
 
   function digitFile(row, value) { return row.digits[value]; }
 
+  /** 按行语言显示组件示例，与字形生成使用同一份格式和字段选项。 */
+  function widgetText(definitions, key, row, v) {
+    const spec = definitions.widgets.find(widget => widget.key === key);
+    if (key === 'week') return row.language === 'zh' ? '星期' + '日一二三四五六'[v.w]
+      : ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'][v.w];
+    if (key === 'text') return row.text ?? spec.sample;
+    if (spec.core) return spec.sample;
+    const mode = row.label === false ? 'bare' : 'format';
+    const english = spec.lang && row.language === 'en';
+    return spec[english ? mode + '_en' : mode].replace(/\{(\w+)(?:\.(\d))?(?::(\d))?\}/g, (_, key, dec, pad) => {
+      const field = definitions.fields[key], raw = v[key];
+      if (field.choices) {
+        const choices = field[english ? 'choices_en' : 'choices'];
+        return choices[Math.max(0, Math.min(choices.length - 1, Math.floor(raw)))];
+      }
+      const scale = 10 ** Number(dec || 0), units = Math.floor(Math.abs(raw) * scale + 0.5);
+      return (field.neg && raw < 0 ? '-' : '') + String(Math.floor(units / scale)).padStart(Number(pad || 1), '0')
+        + (dec ? '.' + String(units % scale).padStart(Number(dec), '0') : '');
+    });
+  }
+
   /**
    * 计算一行组件的图片排布。返回总宽 w 与各片段 {file,x,w}，x 为片段中心相对整行中心的偏移；
    * 单位为字形像素，调用方再乘以缩放。
@@ -54,7 +75,7 @@
     return { w: x, parts };
   }
 
-  const api = { lunar, values, rowParts };
+  const api = { lunar, values, rowParts, widgetText };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.YingchuangWidgets = api;
 })(globalThis);

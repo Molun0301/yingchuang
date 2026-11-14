@@ -9,9 +9,9 @@ const { randomUUID, createHash } = require('node:crypto');
 const { discover } = require('./discovery.cjs');
 const { Store } = require('./store.cjs');
 const { defaultDraft, makeTemplate, applyTemplate, cleanLayout, exportSettings } = require('./model.cjs');
-const { ConversionQueue } = require('./queue.cjs');
-const { evaluateScene, sceneEvaluator, scriptInput } = require('./scenescript.cjs');
-const { installRecorderHandlers, record, bake } = require('./recorder.cjs');
+const { ConversionQueue, CONCURRENCY } = require('./queue.cjs');
+const { evaluateScene, sceneEvaluator, scriptInput, sceneState } = require('./scenescript.cjs');
+const { installRecorderHandlers, record, bake, observe, measureLuts } = require('./recorder.cjs');
 const { frameScene, recordSize } = require('./framing.cjs');
 const { planTimeVariants, localMinute } = require('./timevariants.cjs');
 const { installUpdater } = require('./updater.cjs');
@@ -221,31 +221,51 @@ async function withScripts(theme,draft,signal) {
   return{...theme,...value};
 }
 /**
- * 随时段变化：壁纸脚本（原时钟文字层以外）读取时间时，一天内采样求值，找出随时段变化的对象及各状态的透明度。
- * 结果按主题、设置与日期缓存；没有变化时返回 null。
+ * 按时间导出（实验开关）打开时，渲染器在一天中固定 8 个时刻观察，QuickJS 补上文字和特效参数并定位切换的分钟。
+ * 结果按主题、设置与日期缓存；开关关闭或没有变化时返回 null。
  */
 async function timeVariantsFor(theme,draft,signal) {
-  if(theme.type!=='scene')return null;
+  if(theme.type!=='scene'||draft.export?.timeVariation!==true)return null;
   const detail=await inspect(theme);
   if(!detail.scriptInput)return null;
   const clock=new Set(detail.scriptInput.clockLayerIds);
-  if(!/engine\.timeOfDay|new Date|Date\.now|getHours|getMinutes/.test(JSON.stringify(detail.scriptInput.scene.objects.filter(o=>!clock.has(o.id)))))return null;
   const stat=await fs.stat(theme.source);
-  const key=JSON.stringify([theme.id,stat.mtimeMs,stat.size,draft.properties,new Date().toDateString()]);
+  const key=JSON.stringify([theme.id,stat.mtimeMs,stat.size,draft.properties,draft.layers,new Date().toDateString()]);
   if(!timeCache.has(key)){
     // 同一解释器反复按不同时刻求值，脚本运行时与场景只载入一次。
     timeCache.set(key,(async()=>{
       const evaluator=await sceneEvaluator(scriptInput(detail.scriptInput,draft.properties));
-      try{return await planTimeVariants(async minute=>{if(signal?.aborted)throw new Error('已取消');return evaluator.evaluate(localMinute(minute)).scene;},clock);}
+      try{
+        const job=await observationJob(theme,draft,'observe');
+        return await planTimeVariants(minute=>evaluator.evaluate(localMinute(minute)).scene,clock,{
+          adjustLayerIds:detail.adjustLayerIds,daytimeLayerIds:detail.daytimeLayerIds,
+          observe:next=>observe({job,rendererUrl:rendererUrl(),signal,next}),
+        });
+      }
       finally{evaluator.dispose();}
     })());
     if(timeCache.size>8)timeCache.delete(timeCache.keys().next().value);
   }
-  try{return await timeCache.get(key);}catch(error){timeCache.delete(key);throw error;}
+  try{return await timeCache.get(key);}catch(error){timeCache.delete(key);if(signal?.aborted)throw error;throw new Error('时段变化观察未完成：'+error.message+'。可在编辑器“导出”中改用录制模式。');}
 }
 /** 把各状态代表时刻的烘焙结果并入时段变体，交给转换进程 */
-function withBaked(variants,byScene) {
-  return {scenes:variants.scenes,objects:Object.fromEntries(Object.entries(variants.objects).map(([id,list])=>[id,list.map(v=>({scene:v.scene,alpha:v.alpha,baked:byScene[v.scene]?.[id]??null}))]))};
+function withBaked(variants,byScene,adjust) {
+  const record=(id,{minute,...v},keys)=>({...v,baked:byScene[v.scene]?.[id]??null,...(keys?.length?{adjust:keys}:{})});
+  return {scenes:variants.scenes,
+    objects:Object.fromEntries(Object.entries(variants.objects).map(([id,list])=>[id,list.map((v,i)=>record(id,v,adjust.layers[`${id}_t${i}`]))])),
+    curves:Object.fromEntries(Object.entries(variants.curves).map(([id,v])=>[id,record(id,v,adjust.layers[id])]))};
+}
+/** 只查对象自身字段中的脚本，时间来源与观察触发条件一致。 */
+function scriptReadsTime(value) {
+  return value&&typeof value==='object'&&(/engine\.timeOfDay|new Date|Date\.now|getHours|getMinutes/.test(value.script||'')||Object.values(value).some(scriptReadsTime));
+}
+/** 观察与查色表测量使用同样的小画布，并保留完整场景供控制脚本运行。 */
+async function observationJob(theme,draft,mode) {
+  const [sceneWidth,sceneHeight]=(await inspect(theme)).sourceSize;
+  const full={width:320,height:Math.round(320*sceneHeight/sceneWidth)},patch=await livePatch(theme,draft);
+  patch.transparent=false;
+  return {theme:liveTheme(theme),properties:draft.properties,patch,playing:true,dpr:1,mode,fps:30,warmup:0,frames:0,
+    sceneWidth,sceneHeight,full,crop:{x:0,y:0,...full}};
 }
 /** 完整画面打开前的场景覆盖：隐藏原时钟文字层，图层编辑与用户字体映射到渲染页可读的地址 */
 async function livePatch(theme,draft) {
@@ -284,9 +304,10 @@ async function recordTheme(input,signal,progress) {
     onProgress:share=>progress({phase:'录制完整画面',progress:Math.round(8+share*72)})});
 }
 /** 启动应用壁纸，找到它新开的窗口后实时采集画面；录制结束即结束整个进程树 */
-// 逐层烘焙参数：每层 4 秒循环、15 帧每秒，末尾半秒与开头交叉衔接；显示前先运行 1 秒让粒子铺开。
+// 逐层烘焙：每秒十五帧观察最多十二秒，检出周期后独立定时；未检出时沿用四秒与半秒淡化。
 // version 随烘焙算法变化递增，使旧缓存失效。
-const BAKE={fps:15,seconds:4,fade:.5,warmup:1,version:8};
+// 十二秒观察为最长十一秒的候选留出至少一秒复核；完整帧缓存仍只有四秒加淡化。
+const BAKE={fps:15,seconds:4,maxSeconds:12,fade:.5,warmup:1,version:10};
 /**
  * 图层模式下由 WebGL 渲染器逐层还原 Python 无法精确转换的图层，结果按内容缓存，预览与导出共用。
  * 返回值交给转换进程的 baked 字段。
@@ -296,48 +317,119 @@ const BAKE={fps:15,seconds:4,fade:.5,warmup:1,version:8};
  * 返回 {baked, byScene}：byScene[场景下标][对象编号] 为该时段变体的烘焙记录。
  */
 async function bakeLayers(theme,draft,device,signal,progress,variants) {
-  const varying=new Set(Object.keys(variants?.objects||{}).map(Number));
+  const varying=new Set([...Object.keys(variants?.objects||{}),...Object.keys(variants?.curves||{})].map(Number));
   const scenes=varying.size?variants.scenes:[];
   // 当前时刻与各时段状态的规划在同一个转换进程里完成。
   const [plan,...scenePlans]=await worker({operation:'layer-plans',theme,draft,device,varying:[...varying],scenes:[theme.resolvedScene??null,...scenes]},signal);
   const particles=list=>new Set(list.targets.filter(t=>t.kind==='particle').map(t=>t.id));
   // 合成层连同下方图层渲染成一层，下方图层不再单独输出。
   const members=Object.fromEntries(plan.targets.filter(t=>t.members).map(t=>[t.id,t.members]));
-  const groups=[{targets:plan.targets.map(t=>t.id).filter(id=>!varying.has(id)),particles:particles(plan),members,resolved:theme.resolvedScene}];
+  const groups=[{targets:plan.targets.map(t=>t.id).filter(id=>!varying.has(id)),particles:particles(plan),members,resolved:theme.resolvedScene,adjust:plan.adjust}];
   scenePlans.forEach((scenePlan,index)=>{
-    const ids=new Set(Object.entries(variants.objects).filter(([,list])=>list.some(v=>v.scene===index)).map(([id])=>Number(id)));
-    groups.push({scene:index,minute:variants.minutes[index],targets:scenePlan.targets.map(t=>t.id).filter(id=>ids.has(id)),particles:particles(scenePlan),members:{},resolved:scenes[index]});
+    const ids=new Set([...Object.entries(variants.objects).filter(([,list])=>list.some(v=>v.scene===index)).map(([id])=>Number(id)),
+      ...Object.entries(variants.curves).filter(([,curve])=>curve.scene===index).map(([id])=>Number(id))]);
+    groups.push({scene:index,minute:variants.minutes[index],ids,targets:scenePlan.targets.map(t=>t.id).filter(id=>ids.has(id)),particles:particles(scenePlan),
+      members:Object.fromEntries(scenePlan.targets.filter(t=>t.members).map(t=>[t.id,t.members])),resolved:scenes[index],adjust:scenePlan.adjust});
   });
-  const prepared=await Promise.all(groups.filter(group=>group.targets.length).map(group=>cachedGroup(theme,draft,device,group)));
-  const pending=prepared.filter(entry=>entry.missing.length);
-  const total=prepared.reduce((sum,entry)=>sum+entry.group.targets.length,0),cached=total-pending.reduce((sum,entry)=>sum+entry.missing.length,0);
-  if(pending.length){
-    // 各时段状态缺少的图层一起分给多个窗口并行渲染，窗口数按处理器核数决定。
-    const windows=Math.min(8,Math.max(2,Math.floor(os.cpus().length/4)));
-    const results=await bake({tasks:pending.map(entry=>({job:entry.job,dirs:entry.dirs})),rendererUrl:rendererUrl(),signal,windows,onProgress:share=>progress((cached+share*(total-cached))/total)});
-    await Promise.all(pending.map((entry,k)=>Promise.all(entry.missing.map(async id=>{
-      entry.result[id]=results[k][id]||{empty:true};
-      await fs.mkdir(entry.dirs[id],{recursive:true});await fs.writeFile(path.join(entry.dirs[id],'baked.json'),JSON.stringify(entry.result[id]));
-    }))));
-    await pruneBakes(new Set(prepared.flatMap(entry=>Object.values(entry.dirs))));
+  const adjust={luts:{},layers:{},hidden:[]},tasks=[],measurements=[],states=new Map();
+  const base=await observationJob(theme,draft,'lut'),detail=await inspect(theme);
+  const original=new Map(detail.scriptInput.scene.objects.map(object=>[object.id,object])),daytime=new Set(detail.daytimeLayerIds);
+  for(const group of groups){
+    const order=new Map(group.resolved.objects.map((object,i)=>[object.id,i]));
+    const objects=new Map(group.resolved.objects.map(object=>[object.id,object])),targets=[],taskKey=`lut@${group.minute??'now'}`;
+    group.adjust.sort((a,b)=>order.get(a.id)-order.get(b.id));
+    for(const layer of group.adjust){
+      const below=layer.below.filter(id=>group.ids?group.ids.has(id):!varying.has(id));
+      if(!below.length)continue;
+      const chain=[];
+      for(let object=objects.get(layer.id);object;object=objects.get(object.parent))chain.push(object);
+      const minute=daytime.has(layer.id)||scriptReadsTime(original.get(layer.id))?group.minute??'now':null;
+      const signature=JSON.stringify([chain,minute]);
+      if(!states.has(layer.id))states.set(layer.id,new Map());
+      const layerStates=states.get(layer.id);
+      if(!layerStates.has(signature)){
+        layerStates.set(signature,{key:`${layer.id}@${layerStates.size}`,taskKey});
+        targets.push(layer.id);
+      }
+      measurements.push({...layerStates.get(signature),group,layer,below});
+    }
+    if(targets.length){
+      const patch={...base.patch,keep:targets,state:sceneState(detail.scriptInput.scene,group.resolved,targets)};
+      tasks.push({key:taskKey,job:{...base,patch,minute:group.minute,lut:{size:9,targets}}});
+    }
   }
-  progress(1);
-  const baked={},byScene={};
-  for(const {group,result} of prepared)if(group.minute===undefined)Object.assign(baked,result);else byScene[group.scene]=result;
-  for(const list of Object.values(members))for(const id of list)baked[id]={empty:true};
-  return {baked,byScene};
+  const measured=tasks.length?await measureLuts({tasks,rendererUrl:rendererUrl(),signal}):{};
+  for(const {key,taskKey,group,layer,below}of measurements){
+    const lut=measured[taskKey][layer.id];
+    if(lut.positional){
+      // 混合模式纯色层只盖住局部（如专辑卡片的阴影、边框），按普通图层逐层渲染；全屏后期层无法逐层还原，隐藏。
+      if(layer.kind==='blend'){if((!group.ids||group.ids.has(layer.id))&&!group.targets.includes(layer.id))group.targets.push(layer.id);}
+      else if(!adjust.hidden.includes(layer.id))adjust.hidden.push(layer.id);
+      continue;
+    }
+    adjust.luts[key]={size:lut.size,table:lut.table};
+    for(const id of below){
+      const index=variants?.objects[id]?.findIndex(variant=>variant.scene===group.scene);
+      const target=index!==undefined&&index>=0?`${id}_t${index}`:String(id);
+      (adjust.layers[target]||=[]).push(key);
+    }
+  }
+  // 某一时刻有位置相关效果时，整层都隐藏，避免其余时段残留半套调色。
+  for(const [id,keys]of Object.entries(adjust.layers))adjust.layers[id]=keys.filter(key=>!adjust.hidden.includes(Number(key.split('@')[0])));
+  for(const key of Object.keys(adjust.luts))if(adjust.hidden.includes(Number(key.split('@')[0])))delete adjust.luts[key];
+  const prepared=await Promise.all(groups.filter(group=>group.targets.length).map(group=>cachedGroup(theme,draft,device,group)));
+  // 本次用到的烘焙目录在转换进程读完前不能被其他并行导出的清理删掉。
+  const held=prepared.flatMap(entry=>Object.values(entry.dirs));holdBakes(held);
+  try{
+    // 多个调色变体共用同一份原始画面，本次导出也只烘焙一次。
+    const shared=new Map();
+    for(const entry of prepared){
+      entry.missing=entry.missing.filter(id=>{
+        const dir=entry.dirs[id];
+        if(shared.has(dir))return false;
+        shared.set(dir,{entry,id});return true;
+      });
+      entry.job.targets=entry.missing;
+      entry.job.particles=entry.job.particles.filter(id=>entry.missing.includes(id));
+    }
+    const pending=prepared.filter(entry=>entry.missing.length);
+    const total=prepared.reduce((sum,entry)=>sum+entry.group.targets.length,0),cached=total-pending.reduce((sum,entry)=>sum+entry.missing.length,0);
+    if(pending.length){
+      // 各时段状态缺少的图层一起分给多个窗口并行渲染，窗口数按处理器核数决定。
+      const windows=Math.min(8,Math.max(2,Math.floor(os.cpus().length/4)));
+      const results=await bake({tasks:pending.map(entry=>({job:entry.job,dirs:entry.dirs})),rendererUrl:rendererUrl(),signal,windows,onProgress:share=>progress((cached+share*(total-cached))/total)});
+      await Promise.all(pending.map((entry,k)=>Promise.all(entry.missing.map(async id=>{
+        entry.result[id]=results[k][id]||{empty:true};
+        await fs.mkdir(entry.dirs[id],{recursive:true});await fs.writeFile(path.join(entry.dirs[id],'baked.json'),JSON.stringify(entry.result[id]));
+      }))));
+      await pruneBakes(new Set(prepared.flatMap(entry=>Object.values(entry.dirs))));
+    }
+    progress(1);
+    const baked={},byScene={};
+    for(const entry of prepared){
+      for(const id of entry.group.targets){
+        const source=shared.get(entry.dirs[id]);
+        if(source)entry.result[id]=source.entry.result[source.id];
+      }
+      if(entry.group.minute===undefined)Object.assign(baked,entry.result);else byScene[entry.group.scene]=entry.result;
+    }
+    for(const list of Object.values(members))for(const id of list)baked[id]={empty:true};
+    return {baked,byScene,adjust,release:()=>releaseBakes(held)};
+  }catch(error){releaseBakes(held);throw error;}
 }
 /**
  * 按图层缓存的逐层烘焙：每层的缓存键是它求值后的内容（含上级图层、被引用的图层、图层编辑与取景尺寸），
  * 修改某项设置后只有内容变化的图层需要重新渲染。返回命中的结果与缺少图层的渲染任务。
  */
 async function cachedGroup(theme,draft,device,group) {
-  const [sceneWidth,sceneHeight]=(await inspect(theme)).sourceSize;
+  const detail=await inspect(theme),[sceneWidth,sceneHeight]=detail.sourceSize;
   const framing=frameScene(sceneWidth,sceneHeight,device.width,device.height,draft.layout,draft.motion.amount,draft.motion.vertical);
   const full={width:Math.ceil(sceneWidth*framing.scale),height:Math.ceil(sceneHeight*framing.scale)};
   const patch=await livePatch(theme,draft);patch.transparent=true;
+  patch.state=sceneState(detail.scriptInput.scene,group.resolved,group.targets.flatMap(id=>[id,...(group.members[id]||[])]));
   const stat=await fs.stat(theme.source);
   const objects=new Map((group.resolved?.objects||[]).map(object=>[object.id,object]));
+  const original=new Map(detail.scriptInput.scene.objects.map(object=>[object.id,object])),daytime=new Set(detail.daytimeLayerIds);
   const chain=id=>{const list=[];for(let object=objects.get(id);object&&list.length<32;object=objects.get(object.parent))list.push(object);return list;};
   // 效果引用的其他图层画面（_rt_imageLayerComposite_<编号>）也决定这一层的内容。
   const sources=ids=>{const found=new Set(),pending=[...ids];while(pending.length){const id=pending.pop();if(found.has(id)||!objects.has(id))continue;found.add(id);for(const match of JSON.stringify(objects.get(id).effects||[]).matchAll(/_rt_imageLayerComposite_(\d+)_/g))pending.push(Number(match[1]));}return [...found];};
@@ -347,17 +439,22 @@ async function cachedGroup(theme,draft,device,group) {
     // 没有求值结果的场景（无脚本信息）退回按整套设置区分。
     const together=[id,...(group.members[id]||[])];
     const content=objects.size?sources(together).map(chain):draft.properties;
-    dirs[id]=path.join(bakes,createHash('sha256').update(JSON.stringify([theme.id,stat.mtimeMs,stat.size,full,BAKE,group.minute,content,together.map(member=>patch.layers[member]),patch.fonts])).digest('hex').slice(0,24));
+    const minute=together.some(member=>chain(member).some(object=>daytime.has(object.id))||scriptReadsTime(original.get(member)))?group.minute:undefined;
+    dirs[id]=path.join(bakes,createHash('sha256').update(JSON.stringify([theme.id,stat.mtimeMs,stat.size,full,BAKE,minute,content,together.map(member=>patch.layers[member]),patch.fonts])).digest('hex').slice(0,24));
     try{result[id]=JSON.parse(await fs.readFile(path.join(dirs[id],'baked.json'),'utf8'));await fs.utimes(dirs[id],new Date(),new Date());}
     catch{missing.push(id);}
   }
   const fade=Math.round(BAKE.fade*BAKE.fps);
   const job={theme:liveTheme(theme),properties:draft.properties,patch,playing:true,dpr:1,mode:'bake',targets:missing,particles:missing.filter(id=>group.particles.has(id)),members:group.members,minute:group.minute,
-    fps:BAKE.fps,frames:Math.round(BAKE.seconds*BAKE.fps)+fade,fade,warmup:Math.round(BAKE.warmup*BAKE.fps),sceneWidth,sceneHeight,full,
+    fps:BAKE.fps,probeFrames:Math.round(BAKE.maxSeconds*BAKE.fps)+1,frames:Math.round(BAKE.seconds*BAKE.fps)+fade,fade,warmup:Math.round(BAKE.warmup*BAKE.fps),sceneWidth,sceneHeight,full,
     crop:{x:0,y:0,width:full.width,height:full.height}};
   return {group,dirs,result,missing,job};
 }
 /** 原始帧较大，按最近使用保留约 1.5 GB；current 为本次用到的目录 */
+// 正在使用的烘焙目录（按引用计数）：从逐层渲染开始到转换进程读完为止，清理缓存时跳过。
+const bakesInUse=new Map();
+function holdBakes(dirs){for(const dir of dirs)bakesInUse.set(dir,(bakesInUse.get(dir)||0)+1);}
+function releaseBakes(dirs){for(const dir of dirs){const count=bakesInUse.get(dir)-1;if(count)bakesInUse.set(dir,count);else bakesInUse.delete(dir);}}
 async function pruneBakes(current) {
   const bakes=path.join(app.getPath('userData'),'cache','bakes');
   const entries=await Promise.all((await fs.readdir(bakes)).map(async name=>{
@@ -368,7 +465,7 @@ async function pruneBakes(current) {
     return {folder,time:legacy?0:(await fs.stat(folder)).mtimeMs,size:legacy?Infinity:size};
   }));
   let kept=0;
-  for(const entry of entries.sort((a,b)=>b.time-a.time)){kept+=entry.size;if(kept>1.5e9&&!current.has(entry.folder))await fs.rm(entry.folder,{recursive:true,force:true});}
+  for(const entry of entries.sort((a,b)=>b.time-a.time)){kept+=entry.size;if(kept>1.5e9&&!current.has(entry.folder)&&!bakesInUse.has(entry.folder))await fs.rm(entry.folder,{recursive:true,force:true});}
 }
 async function recordApplication(input,signal,progress) {
   const {theme,draft,device}=input;
@@ -460,11 +557,12 @@ async function setup() {
     if(theme.type!=='scene')return worker({ ...input,theme,operation:'export' },signal,progress);
     progress({phase:'分析时段变化',progress:4});
     const variants=await timeVariantsFor(theme,input.draft,signal);
-    const timed=variants&&Object.keys(variants.objects).length?variants:null;
-    const {baked,byScene}=await bakeLayers(theme,input.draft,input.device,signal,share=>progress({phase:'逐层渲染特效',progress:Math.round(5+share*45)}),timed)
+    const timed=variants;
+    const {baked,byScene,adjust,release}=await bakeLayers(theme,input.draft,input.device,signal,share=>progress({phase:'逐层渲染特效',progress:Math.round(5+share*45)}),timed)
       .catch(error=>{if(signal.aborted)throw error;throw new Error('逐层渲染未完成：'+error.message+'。可在编辑器“导出”中改用录制模式。');});
-    return worker({ ...input,theme,baked,...(timed?{timeVariants:withBaked(timed,byScene)}:{}),operation:'export' },signal,event=>progress({...event,progress:Math.max(52,event.progress)}));
-  });
+    try{return await worker({ ...input,theme,baked,adjust,notes:timed?.notes||[],...(timed?{timeVariants:withBaked(timed,byScene,adjust)}:{}),operation:'export' },signal,event=>progress({...event,progress:Math.max(52,event.progress)}));}
+    finally{release();}
+  },CONCURRENCY);
   queue.on('change',snapshot => notify('queue-change',snapshot));
   installRecorderHandlers();
   protocol.handle('yingchuang',async request => {
@@ -528,16 +626,18 @@ async function setup() {
     const {theme,draft,controller}=pending,device=deviceById(draft.deviceId);
     const live=()=>previewController===controller&&!controller.signal.aborted;
     void (async()=>{
-      // 先逐层渲染特效，再生成带逐层视差的完整预览；渲染失败时保留原生近似效果并说明原因。
-      const notes=[];let baked={},byScene={},timed=null;
+      // 观察或逐层渲染未完成时，预览保留原生近似效果并说明原因。
+      const notes=[];let baked={},byScene={},adjust={luts:{},layers:{},hidden:[]},timed=null,release=()=>{};
       if(theme.type==='scene'){
         const variants=await timeVariantsFor(theme,draft,controller.signal).catch(error=>{if(!controller.signal.aborted)notes.push('时段变化分析未完成：'+error.message);return null;});
         if(variants?.notes.length)notes.push(...variants.notes);
-        timed=variants&&Object.keys(variants.objects).length?variants:null;
-        ({baked,byScene}=await bakeLayers(theme,draft,device,controller.signal,share=>{if(live())notify('preview-progress',{id,requestId,phase:`逐层渲染特效 ${Math.round(share*100)}%`,progress:share});},timed)
-          .catch(error=>{if(!controller.signal.aborted)notes.push('逐层渲染未完成：'+error.message);return {baked:{},byScene:{}};}));
+        timed=variants;
+        ({baked,byScene,adjust,release}=await bakeLayers(theme,draft,device,controller.signal,share=>{if(live())notify('preview-progress',{id,requestId,phase:`逐层渲染特效 ${Math.round(share*100)}%`,progress:share});},timed)
+          .catch(error=>{if(!controller.signal.aborted)notes.push('逐层渲染未完成：'+error.message);return {baked:{},byScene:{},adjust:{luts:{},layers:{},hidden:[]},release:()=>{}};}));
       }
-      const complete=await worker({operation:'motion-preview',theme,draft,device,baked,...(timed?{timeVariants:withBaked(timed,byScene)}:{})},controller.signal,event=>{if(live())notify('preview-progress',{id,requestId,...event});});
+      let complete;
+      try{complete=await worker({operation:'motion-preview',theme,draft,device,baked,adjust,...(timed?{timeVariants:withBaked(timed,byScene,adjust)}:{})},controller.signal,event=>{if(live())notify('preview-progress',{id,requestId,...event});});}
+      finally{release();}
       if(live())notify('preview-ready',{id,requestId,data:previewData({...complete,notes:[...notes,...complete.notes]})});
     })().catch(error=>{if(live())notify('preview-ready',{id,requestId,error:error.message});});
   });
@@ -570,6 +670,7 @@ async function setup() {
     if (typeof input.deviceId==='string') data.settings.deviceId=deviceById(input.deviceId).id;
     if (typeof input.outputDirectory==='string') data.settings.outputDirectory=input.outputDirectory;
     if (input.appearance&&typeof input.appearance==='object') data.settings.appearance=cleanAppearance(input.appearance);
+    if (input.timeVariationNotice===true) data.settings.timeVariationNotice=true;
   }) && state());
   handle('choose-directory',async purpose=>{
     const selection=await dialog.showOpenDialog(window,{title:purpose==='output'?'选择导出位置':'添加壁纸目录',properties:['openDirectory','createDirectory']});

@@ -1,22 +1,62 @@
-// 随时段变化：一天内按 15 分钟采样运行壁纸脚本，找出随时间变化的对象，并为每个对象的各个状态生成一天内的透明度关键点。
-const STEP = 15, DAY = 1440, SAMPLES = DAY / STEP;
-const ANCESTOR_FIELDS = ['visible', 'alpha', 'origin', 'scale', 'angles', 'color', 'parent'];
+// 按时间导出：渲染器在一天中固定的 8 个时刻（及 QuickJS 发现的跳变时刻）观察完整壁纸，QuickJS 在相邻采样之间按分钟定位切换。
+const DAY = 1440;
+// 避开作者常用的整点切换，每 3 小时一个时刻。
+const POINTS = [90, 270, 450, 630, 810, 990, 1170, 1350];
+const TOLERANCE = { origin: .5, scale: .004, alpha: .004, color: .004, brightness: .004, angles: .001 };
+const FIELDS = ['visible', 'effective', 'alpha', 'color', 'origin', 'scale', 'angles', 'brightness'];
+const CURVE_FIELDS = ['visible', 'effective', 'alpha', 'origin', 'scale', 'angles'];
+const wrap = minute => ((minute % DAY) + DAY) % DAY;
 
-/** 对象自身加上祖先的显示与变换：父级随时段隐藏时，子级也算随时段变化 */
-function signatures(scene, exclude) {
-  const byId = new Map(scene.objects.map(object => [object.id, object]));
-  const result = new Map();
-  for (const object of scene.objects) {
-    if (exclude.has(object.id)) continue;
-    const chain = [object];
-    for (let parent = byId.get(object.parent); parent && chain.length < 32; parent = byId.get(parent.parent))
-      chain.push(Object.fromEntries(ANCESTOR_FIELDS.map(key => [key, parent[key]])));
-    result.set(object.id, JSON.stringify(chain));
+/** 渲染器看得到的字段优先；其余文字、材质参数等保留 QuickJS 求值结果。 */
+function observationScene(scene, snapshot) {
+  const result = structuredClone(scene), layers = new Map(snapshot.layers.map(layer => [layer.id, layer]));
+  for (const object of result.objects) {
+    const layer = layers.get(object.id);
+    if (!layer) continue;
+    for (const key of FIELDS) if (key !== 'effective') object[key] = Array.isArray(layer[key]) ? layer[key].join(' ') : layer[key];
   }
   return result;
 }
 
-/** 循环序列的连续段：[{state, start, length}]，起点对齐到状态变化处 */
+/** 签名只给渲染器字段容差，QuickJS 其余字段保持精确比较。 */
+function same(a, b, key = '', rendered = false) {
+  if (a === b) return true;
+  if (typeof a === 'number' && typeof b === 'number') return rendered && Math.abs(a - b) <= TOLERANCE[key];
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every(field => same(a[field], b[field], Array.isArray(a) ? key : field, rendered || field === 'render'));
+}
+
+/** 每层的状态：自身、上级，以及绘制顺序在它之上的调色层；任一时刻不稳定的字段不参与比较。 */
+function signatures(samples, exclude, adjustLayerIds) {
+  const unstable = new Map();
+  for (const { snapshot } of samples) for (const [id, fields] of Object.entries(snapshot.unstable))
+    unstable.set(Number(id), new Set([...(unstable.get(Number(id)) || []), ...fields]));
+  return samples.map(({ scene, snapshot }) => {
+    const byId = new Map(scene.objects.map(object => [object.id, object]));
+    const layers = new Map(snapshot.layers.map(layer => [layer.id, layer]));
+    const node = id => {
+      const object = byId.get(id), layer = layers.get(id), ignored = unstable.get(id) || new Set();
+      return { id, render: Object.fromEntries(FIELDS.filter(key => !ignored.has(key) && layer).map(key => [key, layer[key]])),
+        rest: Object.fromEntries(Object.entries(object).filter(([key]) => (!layer || !FIELDS.includes(key)) && !ignored.has(key))) };
+    };
+    const parents = id => {
+      const result = [];
+      for (let object = byId.get(byId.get(id)?.parent); object; object = byId.get(object.parent)) result.push(node(object.id));
+      return result;
+    };
+    const result = new Map();
+    for (let i = 0; i < scene.objects.length; i++) {
+      const object = scene.objects[i];
+      if (exclude.has(object.id)) continue;
+      const adjust = scene.objects.slice(i + 1).filter(above => adjustLayerIds.has(above.id)).map(above => ({ self: node(above.id), parents: parents(above.id) }));
+      result.set(object.id, { self: node(object.id), parents: parents(object.id), adjust });
+    }
+    return result;
+  });
+}
+
+/** 循环序列的连续段，起点对齐到状态变化处。 */
 function cyclicRuns(states) {
   const n = states.length;
   let offset = states.findIndex((state, i) => state !== states[(i - 1 + n) % n]);
@@ -30,93 +70,216 @@ function cyclicRuns(states) {
   return runs;
 }
 
-const wrap = minute => ((minute % DAY) + DAY) % DAY;
-
-/** 某个稳定段在时刻 m 的权重：上层变体渐入/渐出，下层变体在过渡期间保持不透明，叠加后等于两种画面的线性混合 */
+/** 上层渐入/渐出，下层在叠加期间保持不透明，让最终画面等于两种状态的线性混合。 */
 function runWeight(run, minute) {
-  const rel = wrap(minute - run.a0), A1 = wrap(run.a1 - run.a0), B0 = wrap(run.b0 - run.a0), B1 = wrap(run.b1 - run.a0);
+  const rel = wrap(minute - run.a0), A1 = wrap(run.a1 - run.a0), B0 = wrap(run.b0 - run.a0), B1 = wrap(run.b1 - run.a0) || DAY;
   if (rel < A1) return run.enterOnTop ? rel / A1 : 1;
-  if (rel <= B0) return 1;
-  if (rel <= B1) return run.exitUnder ? 1 : 1 - (rel - B0) / Math.max(1e-6, B1 - B0);
+  if (rel < B0) return 1;
+  if (rel <= B1) return run.exitUnder ? 1 : B1 === B0 ? 0 : 1 - (rel - B0) / (B1 - B0);
   return 0;
 }
 
-/** 由权重函数取关键点：所有过渡端点及其两侧（含午夜两侧），按上一个保留点去掉共线点 */
+/** 权重折点保留切换前后两侧，硬切换不会被拉成渐变。 */
 function keypoints(weight, breaks) {
   const minutes = [...new Set([0, .01, DAY - .01, DAY, ...breaks.flatMap(m => [m - .01, m, m + .01]).map(m => Math.min(DAY, Math.max(0, m)))])].sort((a, b) => a - b);
-  // 1440 与 0 是同一时刻，取左侧极限，避免午夜跳变被插值成斜线。
   const points = minutes.map(m => [Math.round(m * 100) / 100, Math.round(weight(m === DAY ? DAY - 1e-6 : m) * 1000) / 1000]);
   const kept = [points[0]];
   for (let i = 1; i < points.length - 1; i++) {
     const [x0, y0] = kept[kept.length - 1], [x, y] = points[i], [x1, y1] = points[i + 1];
-    if (Math.abs(y0 + (y1 - y0) * (x - x0) / (x1 - x0 || 1) - y) > 1e-4) kept.push(points[i]);
+    if (breaks.includes(x) || Math.abs(y0 + (y1 - y0) * (x - x0) / (x1 - x0 || 1) - y) > 1e-4) kept.push(points[i]);
   }
   kept.push(points[points.length - 1]);
   return kept;
 }
 
-/**
- * evaluate(minute) 返回该时刻求值后的场景；exclude 为不参与的对象（原时钟文字层）。
- * 返回 null 表示没有随时段变化的对象；否则 {scenes, objects, notes}，objects[id] 为该对象各状态的 {scene, minute, alpha}。
- */
-async function planTimeVariants(evaluate, exclude = new Set()) {
-  const samples = [];
-  for (let i = 0; i < SAMPLES; i++) samples.push(await evaluate(i * STEP));
-  const sigs = samples.map(scene => signatures(scene, exclude));
-  const notes = [], plans = [], cache = new Map();
-  const sigAt = async (minute, id) => {
-    if (!cache.has(minute)) cache.set(minute, signatures(await evaluate(minute), exclude));
-    return cache.get(minute).get(id);
-  };
-  for (const id of sigs[0].keys()) {
-    const states = sigs.map(map => map.get(id));
-    if (states.every(state => state === states[0])) continue;
-    const name = samples[0].objects.find(object => object.id === id)?.name ?? id;
-    const runs = cyclicRuns(states);
-    // 大部分时刻都在变化的（秒、分钟显示等）无法按时段拆分，保持导出时刻的状态。
-    if (runs.filter(run => run.length === 1).length > SAMPLES * .6) { notes.push(`${name} 持续随时间变化，按导出时刻固定`); continue; }
-    let stable = runs.filter(run => run.length >= 2);
-    stable = stable.filter((run, i) => i === 0 || run.state !== stable[i - 1].state);
-    if (stable.length > 1 && stable[0].state === stable[stable.length - 1].state) { stable[0] = { ...stable[0], start: stable[stable.length - 1].start, length: stable[0].length + stable[stable.length - 1].length }; stable.pop(); }
-    if (stable.length < 2) continue;
-    const variants = [...new Set(stable.map(run => run.state))];
-    if (variants.length > 8) { notes.push(`${name} 时段状态超过 8 种，按导出时刻固定`); continue; }
-    // 相邻稳定段之间：中间有过渡采样的按线性渐变；紧挨着的是瞬间切换，按分钟二分定位切换时刻。
-    const windows = [];
-    for (let i = 0; i < stable.length; i++) {
-      const from = stable[i], to = stable[(i + 1) % stable.length];
-      const end = (from.start + from.length - 1) * STEP, begin = to.start * STEP;
-      if (wrap(begin - end) === STEP) {
-        let low = end, high = end + STEP;
-        while (high - low > 1) { const mid = Math.floor((low + high) / 2); if (await sigAt(wrap(mid), id) === to.state) high = mid; else low = mid; }
-        windows.push([wrap(high), wrap(high)]);
-      } else windows.push([wrap(end), wrap(begin)]);
-    }
-    const runsInfo = stable.map((run, i) => {
-      const before = windows[(i - 1 + stable.length) % stable.length], after = windows[i];
-      const variant = variants.indexOf(run.state), previous = variants.indexOf(stable[(i - 1 + stable.length) % stable.length].state), next = variants.indexOf(stable[(i + 1) % stable.length].state);
-      return { variant, a0: before[0], a1: before[1], b0: after[0], b1: after[1], enterOnTop: variant > previous, exitUnder: next > variant, run };
-    });
-    const breaks = windows.flat();
-    plans.push({ id, variants: variants.map((state, v) => {
-      const longest = stable.filter(run => run.state === state).sort((a, b) => b.length - a.length)[0];
-      const minute = wrap((longest.start + Math.floor((longest.length - 1) / 2)) * STEP);
-      const mine = runsInfo.filter(info => info.variant === v);
-      return { minute, alpha: keypoints(m => Math.min(1, mine.reduce((sum, info) => sum + runWeight(info, m), 0)), breaks) };
-    }) });
-  }
-  if (!plans.length) return notes.length ? { scenes: [], objects: {}, notes } : null;
-  const minutes = [...new Set(plans.flatMap(plan => plan.variants.map(variant => variant.minute)))].sort((a, b) => a - b);
-  return {
-    scenes: minutes.map(minute => samples[minute / STEP]), minutes, notes,
-    objects: Object.fromEntries(plans.map(plan => [String(plan.id), plan.variants.map(variant => ({ scene: minutes.indexOf(variant.minute), minute: variant.minute, alpha: variant.alpha }))])),
-  };
+const interpolate = (a, b, t) => {
+  if (typeof a === 'number' && typeof b === 'number') return a + (b - a) * t;
+  if (Array.isArray(a)) return a.map((value, i) => interpolate(value, b[i], t));
+  return t < .5 ? a : b;
+};
+
+function opacity(state) {
+  return [state.self, ...state.parents].some(node => node.render.visible === false || node.render.effective === false) ? 0 : (state.self.render.alpha ?? 1);
+}
+function strip(state, own, parent) {
+  const remove = (node, fields) => ({ ...node, render: Object.fromEntries(Object.entries(node.render).filter(([key]) => !fields.includes(key))) });
+  return { ...state, self: remove(state.self, own), parents: state.parents.map(node => remove(node, parent)) };
+}
+const curveBase = state => strip(state, CURVE_FIELDS, ['visible', 'effective', 'alpha']);
+const visibilityBase = state => strip(state, ['visible', 'effective'], ['visible', 'effective']);
+
+/** 两个状态之间变了的值里是否有文字、资源名等不能插值的内容；文字字段即使是数字也不能靠两张画面渐变得到。 */
+function nonInterpolable(a, b, text = false) {
+  if (same(a, b)) return false;
+  const numeric = value => typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string' &&
+    value.trim().split(/\s+/).every(part => part !== '' && !Number.isNaN(Number(part)));
+  if (a && b && typeof a === 'object' && typeof b === 'object')
+    return [...new Set([...Object.keys(a), ...Object.keys(b)])].some(key => nonInterpolable(a[key], b[key], text || key === 'text'));
+  return text || !(numeric(a) && numeric(b));
 }
 
-/** 本地当天 0 点起第 minute 分钟的时间戳 */
+/**
+ * 相邻观察时刻 a、b 之间的切换：QuickJS 显示一次跳变 → {w0:w1:该分钟}；多次变化 → 首末变化之间渐变；
+ * QuickJS 没有变化 → 只有可见性不同时在中点硬切换，否则整个区间渐变。
+ */
+async function locate(quick, id, a, b, from, to) {
+  const at = async minute => (await quick(minute)).get(id);
+  const start = await at(a), end = await at(b);
+  if (same(start, end)) {
+    if (same(visibilityBase(from), visibilityBase(to))) { const middle = Math.round((a + b) / 2); return { w0: middle, w1: middle, gradual: false }; }
+    return { w0: a, w1: b, gradual: true };
+  }
+  let low = a, high = b;
+  while (high - low > 1) { const middle = Math.floor((low + high) / 2); if (same(await at(middle), start)) low = middle; else high = middle; }
+  const first = high;
+  low = a; high = b;
+  while (high - low > 1) { const middle = Math.floor((low + high) / 2); if (same(await at(middle), end)) high = middle; else low = middle; }
+  return first === high ? { w0: first, w1: first, gradual: false } : { w0: first - 1, w1: high, gradual: true };
+}
+
+/** 区间内 QuickJS 状态跳变的分钟（变化后的第一分钟）；跳变超过 limit 次（如分钟文字、逐分钟渐变）返回 null。 */
+async function jumps(quick, id, a, b, limit = 4) {
+  const at = async minute => (await quick(minute)).get(id), found = [];
+  const walk = async (low, high, from, to) => {
+    if (found.length > limit || same(from, to)) return;
+    if (high - low === 1) { found.push(high); return; }
+    const middle = Math.floor((low + high) / 2), state = await at(middle);
+    await walk(low, middle, from, state);
+    await walk(middle, high, state, to);
+  };
+  await walk(a, b, await at(a), await at(b));
+  return found.length > limit ? null : found;
+}
+
+/** 按各采样时刻的值与相邻采样之间的切换方式生成一天的分段线性关键点。 */
+function seriesPoints(values, windows, equal, minutes) {
+  const points = [];
+  for (let i = 0; i < minutes.length; i++) {
+    const value = values[i], next = values[(i + 1) % minutes.length];
+    points.push([minutes[i], value]);
+    if (equal(value, next)) continue;
+    const { w0, w1 } = windows[i];
+    points.push(w0 === w1 ? [w0 - .01, value] : [w0, value], [w1, next]);
+  }
+  points.push([minutes[0] + DAY, values[0]]);
+  const valueAt = minute => {
+    const m = minute < minutes[0] ? minute + DAY : minute;
+    let i = 1;
+    while (i < points.length - 1 && points[i][0] < m) i++;
+    const [x0, y0] = points[i - 1], [x1, y1] = points[i];
+    return x1 === x0 ? y1 : interpolate(y0, y1, (m - x0) / (x1 - x0));
+  };
+  const breaks = [...new Set([0, DAY, ...points.map(([minute]) => Math.round(wrap(minute) * 100) / 100)])].sort((a, b) => a - b);
+  return breaks.map(minute => [minute, valueAt(minute === DAY ? DAY - 1e-6 : minute)]);
+}
+
+/** 观察值按段分组为变体，段与段之间按切换方式渐入渐出。 */
+function stateVariants(states, windows, minutes) {
+  const values = [], indices = states.map(state => {
+    let i = values.findIndex(value => same(value, state));
+    if (i < 0) { i = values.length; values.push(state); }
+    return i;
+  });
+  const runs = cyclicRuns(indices), variants = [...new Set(runs.map(run => run.state))];
+  const edges = runs.map(run => { const { w0, w1 } = windows[(run.start + run.length - 1) % minutes.length]; return [wrap(w0), wrap(w1)]; });
+  return variants.map((state, v) => {
+    const mine = runs.flatMap((run, i) => {
+      if (run.state !== state) return [];
+      const before = edges[(i - 1 + runs.length) % runs.length], after = edges[i];
+      return [{ a0: before[0], a1: before[1], b0: after[0], b1: after[1],
+        enterOnTop: v > variants.indexOf(runs[(i - 1 + runs.length) % runs.length].state), exitUnder: variants.indexOf(runs[(i + 1) % runs.length].state) > v }];
+    });
+    const longest = runs.filter(run => run.state === state).sort((a, b) => b.length - a.length)[0];
+    const minute = minutes[(longest.start + Math.floor((longest.length - 1) / 2)) % minutes.length];
+    return { minute, alpha: keypoints(m => variants.length === 1 ? 1 : Math.min(1, mine.reduce((sum, run) => sum + runWeight(run, m), 0)), edges.flat()) };
+  });
+}
+
+/** 着色器直接读取时刻的图层：8 个时刻各一份画面，相邻时刻之间线性渐变。 */
+function blendVariants(minutes) {
+  return minutes.map((minute, index) => {
+    const previous = (index - 1 + minutes.length) % minutes.length, next = (index + 1) % minutes.length;
+    const run = { a0: minutes[previous], a1: minute, b0: minute, b1: minutes[next], enterOnTop: index > previous, exitUnder: next > index };
+    return { minute, alpha: keypoints(m => runWeight(run, m), minutes) };
+  });
+}
+
+/**
+ * evaluate(minute) 返回该分钟的 QuickJS 求值场景；observe 接收 next 回调，由录制窗口依次提供 snapshot。
+ * 先在固定的 8 个时刻观察；QuickJS 发现某个区间内有几次跳变时（如一天七八种的时段文字），第二天再补看每次跳变后的那一分钟，
+ * 让每个中间状态都有渲染画面。返回约定 6 的场景、变体与曲线；没有任何变化时返回 null。
+ */
+async function planTimeVariants(evaluate, exclude = new Set(), { observe, adjustLayerIds = [], daytimeLayerIds = [] }) {
+  const adjust = new Set(adjustLayerIds), daytime = new Set(daytimeLayerIds), samples = [], cache = new Map();
+  const quick = async minute => {
+    const m = wrap(minute);
+    if (!cache.has(m)) cache.set(m, signatures([{ scene: await evaluate(m), snapshot: { layers: [], unstable: {} } }], exclude, adjust)[0]);
+    return cache.get(m);
+  };
+  const requests = POINTS.map(minute => ({ day: 0, minute }));
+  let index = 0;
+  await observe(async snapshot => {
+    if (snapshot) samples.push({ minute: snapshot.minute, scene: observationScene(await evaluate(snapshot.minute), snapshot), snapshot });
+    if (index === POINTS.length && requests.length === POINTS.length) {
+      const sigs = signatures(samples, exclude, adjust), extra = new Set();
+      for (const id of sigs[0].keys()) {
+        if (adjust.has(id) || daytime.has(id)) continue;
+        for (let i = 0; i < POINTS.length; i++) {
+          if (same(sigs[i].get(id), sigs[(i + 1) % POINTS.length].get(id))) continue;
+          const found = await jumps(quick, id, POINTS[i], i < POINTS.length - 1 ? POINTS[i + 1] : POINTS[0] + DAY);
+          // 只补看持续 10 分钟以上的中间状态；更短的是切换过程（如脚本一分钟内的过渡），不单独成为一个时段。
+          // 最后一次跳变后的状态由区间终点的观察代表。
+          if (found?.length > 1) for (let k = 0; k < found.length - 1; k++)
+            if (found[k + 1] - found[k] >= 10 && !POINTS.includes(wrap(found[k]))) extra.add(wrap(found[k]));
+        }
+      }
+      requests.push(...[...extra].sort((a, b) => a - b).map(minute => ({ day: 1, minute })));
+    }
+    return requests[index++] || null;
+  });
+  samples.sort((a, b) => a.minute - b.minute);
+  const minutes = samples.map(sample => sample.minute), sigs = signatures(samples, exclude, adjust);
+  const objects = {}, curves = {}, notes = [];
+  for (const id of sigs[0].keys()) {
+    if (adjust.has(id)) continue;
+    const states = sigs.map(map => map.get(id)), name = samples[0].scene.objects.find(object => object.id === id).name ?? id;
+    if (daytime.has(id) || states[0].adjust.some(layer => daytime.has(layer.self.id))) { objects[id] = blendVariants(POINTS); continue; }
+    if (states.every(state => same(states[0], state))) continue;
+    const windows = [];
+    for (let i = 0; i < minutes.length; i++) {
+      const from = states[i], to = states[(i + 1) % minutes.length];
+      windows.push(same(from, to) ? null : await locate(quick, id, minutes[i], i < minutes.length - 1 ? minutes[i + 1] : minutes[0] + DAY, from, to));
+    }
+    // 区间内多次变化的文字等不能渐变（例如没有识别为时钟的分钟文字），按导出时刻固定。
+    if (windows.some((window, i) => window?.gradual && nonInterpolable(states[i], states[(i + 1) % minutes.length]))) {
+      notes.push(`${name} · 持续随时间变化，按导出时刻固定`);
+      continue;
+    }
+    if (states.every(state => same(curveBase(states[0]), curveBase(state)))) {
+      const alphas = states.map(opacity), maximum = Math.max(...alphas);
+      const curve = { minute: minutes[alphas.indexOf(maximum)] };
+      const near = key => (x, y) => Array.isArray(x) ? x.every((value, i) => Math.abs(value - y[i]) <= TOLERANCE[key]) : Math.abs(x - y) <= TOLERANCE[key];
+      if (alphas.some(alpha => Math.abs(alpha - alphas[0]) > TOLERANCE.alpha))
+        curve.alpha = seriesPoints(alphas.map(alpha => maximum ? alpha / maximum : 0), windows, near('alpha'), minutes);
+      for (const key of ['origin', 'scale', 'angles']) {
+        const values = states.map(state => state.self.render[key]);
+        if (values.some(value => !near(key)(values[0], value))) curve[key] = seriesPoints(values, windows, near(key), minutes);
+      }
+      curves[id] = curve;
+      continue;
+    }
+    objects[id] = stateVariants(states, windows, minutes);
+  }
+  if (!Object.keys(objects).length && !Object.keys(curves).length && !notes.length) return null;
+  const used = [...new Set([...Object.values(objects).flat().map(variant => variant.minute), ...Object.values(curves).map(curve => curve.minute)])].sort((a, b) => a - b);
+  for (const item of [...Object.values(objects).flat(), ...Object.values(curves)]) item.scene = used.indexOf(item.minute);
+  return { scenes: used.map(minute => samples.find(sample => sample.minute === minute).scene), minutes: used, objects, curves, notes };
+}
+
+/** 本地当天 0 点起第 minute 分钟的时间戳。 */
 function localMinute(minute) { const date = new Date(); date.setHours(0, 0, 0, 0); return date.getTime() + minute * 60000; }
 
-/** 分段线性关键点在时刻 m 的取值（预览与测试共用） */
+/** 分段线性关键点在时刻 m 的取值，预览与测试共用。 */
 function weightAt(points, minute) {
   let i = 1;
   while (i < points.length - 1 && points[i][0] < minute) i++;
@@ -124,4 +287,4 @@ function weightAt(points, minute) {
   return x1 === x0 ? y1 : y0 + (y1 - y0) * (minute - x0) / (x1 - x0);
 }
 
-module.exports = { planTimeVariants, localMinute, weightAt, STEP };
+module.exports = { planTimeVariants, observationScene, localMinute, weightAt, POINTS };

@@ -3,15 +3,17 @@ import { ArrowDownToLine, ArrowUpRight, Check, CircleAlert, FolderOpen, LoaderCi
 import { Glass } from './appearance';
 import { Toggle } from './controls';
 import type { ToastKind } from './ui';
-import type { UpdateDownload, UpdateProgress, UpdateRelease, UpdateSettings, UpdateStatus } from './types';
+import type { UpdateChangelog, UpdateDownload, UpdateProgress, UpdateRelease, UpdateSettings, UpdateStatus } from './types';
 import './updater.css';
 
+const QUARK_DOWNLOAD = 'https://pan.quark.cn/s/320e0f140cf6';
 const errorText = (error: unknown) => (error as Error).message.replace(/^Error invoking remote method '[^']+': Error: /, '');
 const bytes = (value: number) => value >= 1048576 ? `${(value / 1048576).toFixed(1)} MB` : `${(value / 1024).toFixed(0)} KB`;
 
 export function useUpdater(notify: (message: string, kind?: ToastKind) => void) {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [release, setRelease] = useState<UpdateRelease | null>(null);
+  const [changelog, setChangelog] = useState<UpdateChangelog | null>(null);
   const [open, setOpen] = useState(false), [checking, setChecking] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'downloading' | 'ready' | 'installing'>('idle');
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
@@ -19,6 +21,7 @@ export function useUpdater(notify: (message: string, kind?: ToastKind) => void) 
   const [error, setError] = useState(''), [checked, setChecked] = useState(false);
   useEffect(() => {
     void window.yingchuang.updateSettings().then(setStatus).catch(e => setError(errorText(e)));
+    void window.yingchuang.updateChangelog().then(setChangelog).catch(e => setError(errorText(e)));
     return window.yingchuang.onUpdate(event => {
       if (event.type === 'available') { setRelease(event.release); setOpen(true); }
       if (event.type === 'progress') setProgress(event.progress);
@@ -63,15 +66,20 @@ export function useUpdater(notify: (message: string, kind?: ToastKind) => void) 
       if (result.manual) { setPhase('ready'); setOpen(false); notify(result.message!, 'info'); }
     } catch (e) { setError(errorText(e)); setPhase('ready'); }
   }
-  async function openRelease() {
-    try { await window.yingchuang.openRelease(release?.url); }
+  async function openRelease(url = release?.url) {
+    try { await window.yingchuang.openRelease(url); }
     catch (e) { setError(errorText(e)); }
   }
-  return { status, release, open, setOpen, checking, phase, progress, downloaded, error, checked,
+  return { status, release, changelog, setChangelog, open, setOpen, checking, phase, progress, downloaded, error, checked,
     check, settings, skip, download, cancel, install, openRelease };
 }
 
 type Updater = ReturnType<typeof useUpdater>;
+
+function ManualDownloads({ updater: u }: { updater: Updater }) {
+  // 更新失败时的手动下载入口，链接样式与“查看更新”一致。
+  return <p className="update-manual-downloads"><span>可手动下载：</span><button className="text-button" onClick={() => void u.openRelease()}>GitHub 发布页<ArrowUpRight size={13}/></button><button className="text-button" onClick={() => void u.openRelease(QUARK_DOWNLOAD)}>夸克网盘<ArrowUpRight size={13}/></button></p>;
+}
 
 export function UpdateBadge({ updater }: { updater: Updater }) {
   if (!updater.release?.available || updater.status?.settings.skipVersion === updater.release.latest) return null;
@@ -110,22 +118,34 @@ function ReleaseNotes({ text }: { text: string }) {
 
 export function UpdateDialog({ updater: u }: { updater: Updater }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const visible = Boolean(u.changelog) || u.open;
   useEffect(() => {
-    if (!u.open) return;
+    if (!visible) return;
     const element = dialog.current!;
     element.showModal();
     return () => element.close();
-  }, [u.open]);
-  if (!u.open) return null;
+  }, [visible]);
+  if (!visible) return null;
+  if (u.changelog) {
+    const announcement = u.changelog;
+    const published = new Date(announcement.publishedAt).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+    return <dialog ref={dialog} className="updater-overlay" aria-labelledby="update-changelog-title" onCancel={event => { event.preventDefault(); u.setChangelog(null); }}>
+      <Glass className="updater-dialog" refraction={false}>
+        <header className="update-header"><div className="update-emblem"><Sparkles size={23}/></div><div><h2 id="update-changelog-title">已更新到 {announcement.version}</h2><p>发布于 {published}</p></div></header>
+        <div className="update-body"><ReleaseNotes text={announcement.notes}/><button className="text-button update-release-link" onClick={() => void u.openRelease(announcement.url)}>查看完整发布说明<ArrowUpRight size={14}/></button></div>
+        <footer className="update-footer"><div className="update-actions update-actions-end"><button className="button primary" onClick={() => u.setChangelog(null)}>知道了</button></div></footer>
+      </Glass>
+    </dialog>;
+  }
   const release = u.release!, busy = u.phase === 'downloading' || u.phase === 'installing';
   const ready = u.downloaded?.version === release.latest;
   const published = new Date(release.publishedAt).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
   return <dialog ref={dialog} className="updater-overlay" aria-labelledby="update-title" onCancel={event => { event.preventDefault(); u.setOpen(false); }}>
-    <Glass className="updater-dialog">
+    <Glass className="updater-dialog" refraction={false}>
       <header className="update-header"><div className="update-emblem"><Sparkles size={23}/></div><div><h2 id="update-title">发现新版本 {release.latest}</h2><p>当前版本 {release.current} · 发布于 {published}</p></div><button className="icon-button" aria-label="关闭更新对话框" onClick={() => u.setOpen(false)}><X size={18}/></button></header>
       <div className="update-body"><ReleaseNotes text={release.notes}/><button className="text-button update-release-link" onClick={() => void u.openRelease()}>查看完整发布说明<ArrowUpRight size={14}/></button></div>
       <footer className="update-footer">
-        {u.error && <p className="update-error" role="alert"><CircleAlert size={15}/>{u.error}</p>}
+        {u.error && <><p className="update-error" role="alert"><CircleAlert size={15}/>{u.error}</p><ManualDownloads updater={u}/></>}
         {!release.asset && <p className="update-hint">此版本没有适用于当前系统的下载文件，可前往发布页查看。</p>}
         {u.phase === 'downloading' && <div className="update-transfer" role="status"><div className="update-transfer-heading"><span>{u.progress ? `正在下载 · ${Math.min(100, u.progress.percent).toFixed(0)}%` : '正在连接下载…'}</span><span>{u.progress ? `${bytes(u.progress.speed)}/秒` : ''}</span></div><div className="update-progress" role="progressbar" aria-label="更新下载进度" aria-valuenow={Math.round(u.progress?.percent || 0)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.min(100, u.progress?.percent || 0)}%` }}/></div><p>{bytes(u.progress?.downloaded || 0)} / {bytes(release.asset?.size || 0)}</p></div>}
         {ready && <p className="update-verified"><Check size={15}/>下载完成，文件完整性校验通过</p>}
@@ -140,7 +160,7 @@ export function UpdateSettingsSection({ updater: u, version }: { updater: Update
   const busy = u.checking || u.phase === 'downloading' || u.phase === 'installing';
   return <Glass as="section" refraction={false} className="settings-section update-settings"><h2>关于与更新</h2>
     <div className="settings-row"><div><h3>映窗 {u.status?.current || version}</h3><p>莫伦Molun</p></div><button className="button secondary" disabled={busy} onClick={() => void u.check()}>{u.checking ? <LoaderCircle className="spin" size={15}/> : <RefreshCw size={15}/>}{u.checking ? '检查中…' : '检查更新'}</button></div>
-    {u.error ? <p className="update-error" role="alert"><CircleAlert size={14}/>{u.error}</p> : u.release?.available ? <div className="update-check-result"><Sparkles size={14}/><span>发现新版本 {u.release.latest}</span><button className="text-button" onClick={() => u.setOpen(true)}>查看更新<ArrowUpRight size={13}/></button></div> : u.checked && <p className="update-check-result"><Check size={14}/>已是最新版本</p>}
+    {u.error ? <><p className="update-error" role="alert"><CircleAlert size={14}/>{u.error}</p><ManualDownloads updater={u}/></> : u.release?.available ? <div className="update-check-result"><Sparkles size={14}/><span>发现新版本 {u.release.latest}</span><button className="text-button" onClick={() => u.setOpen(true)}>查看更新<ArrowUpRight size={13}/></button></div> : u.checked && <p className="update-check-result"><Check size={14}/>已是最新版本</p>}
     <div className="settings-row"><div><h3>自动检查更新</h3><p>启动后检查新版本，每 6 小时最多检查一次</p></div><Toggle label="自动检查更新" hideLabel checked={u.status?.settings.auto ?? true} onChange={auto => void u.settings({ auto })}/></div>
     <div className="settings-row"><div><h3>版本发布</h3></div><button className="text-button" onClick={() => void u.openRelease()}>查看发布页<ArrowUpRight size={14}/></button></div>
   </Glass>;

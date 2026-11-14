@@ -173,7 +173,7 @@ def fit_layers(stage, layers, config, sw, sh, mirror=()) -> dict:
         if len(members) == 1:
             index = next(iter(members))
             layer = layers[index]
-            if abs(layer["rotation"]) < .01:
+            if abs(layer["rotation"]) < .01 and not any(key in layer.get("curve",{}) for key in ("dx","dy","sx","sy","rot")):
                 mx, my = width * (amp * layer["motion"] + .02), height * (amp * layer["motion"] * vertical + .02)
                 visible = ((-left - mx) / scale, (-top - my) / scale,
                            (width - left + mx) / scale, (height - top + my) / scale)
@@ -185,7 +185,8 @@ def fit_layers(stage, layers, config, sw, sh, mirror=()) -> dict:
                 crop = _crop(layer, visible, size, 2 if video_paths else 1)
                 if crop != (0, 0, 1, 1):
                     cropped.add(index)
-        target = tuple(max(2, int(max(layers[i][key] for i in members) * scale * density + .5)) for key in ("w", "h"))
+        target = tuple(max(2, int(max(layers[i][key] * max([1,*[value for _,value in layers[i].get("curve",{}).get(axis,[])]])
+                                     for i in members) * scale * density + .5)) for key,axis in (("w","sx"),("h","sy")))
         if _fit_images(stage, images, crop, target, quality):
             shrunk.update(members)
         jobs.extend((name, crop, target, members) for name in video_paths)

@@ -17,6 +17,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from 骨骼动画 import bilinear, decode_rig, render_cycle
+from 调色查表 import apply_luts
+from 时段曲线 import layer_curve
 
 
 ASSET_ERRORS = (ValueError, KeyError, IndexError, TypeError, OSError, struct.error)
@@ -206,7 +208,7 @@ def finish_frame(image, layer, grade=(0, 0)):
         pixels[..., :3] *= 255/np.maximum(1, light)
         pixels[..., 3:] *= light/255
         image = Image.fromarray(np.rint(pixels).astype(np.uint8))
-    return image
+    return apply_luts(image, layer.get("_luts", []))
 
 
 def numbers(raw, default):
@@ -228,8 +230,9 @@ def sample_scalar(rng, setting, default, limit):
     return min(limit, max(0, rng.uniform(lo, hi)))
 
 
-def sprite_assets(assets, texture, material, name, descriptor, color):
+def sprite_assets(assets, texture, material, name, descriptor, color, luts=()):
     style = {"blend": material.get("blending", "normal"), "color": color}
+    if luts:style["_luts"]=luts
     if assets.is_atlas(texture):
         frames = atlas_frames(assets, texture, first_only=assets.fast)
         if len(frames) > 1:
@@ -399,7 +402,7 @@ def sprite_tracks(assets, obj, state, sw, sh, name, limit, properties):
                        "motion":motion, "travel":path, "fade":fade})
     if not layers:
         raise ValueError("粒子默认轨迹未进入画幅")
-    asset, sequence, aspect = sprite_assets(assets, texture, material, name, descriptor, tint)
+    asset, sequence, aspect = sprite_assets(assets, texture, material, name, descriptor, tint, obj.get("_luts",()))
     for layer in layers:
         layer["asset"] = asset
         layer["h"] *= aspect
@@ -449,9 +452,13 @@ def source_text(assets, obj, geometry):
     return image
 
 
-def cached_video(source, output, fps):
+def cached_video(source, output, fps, luts=()):
     """同一段内嵌视频按帧率只转码一次，结果放在原视频旁边（媒体缓存）；修改壁纸设置后重新生成预览时直接复用。"""
     from 视频处理 import encode
+    if luts:
+        # 调色状态已包含在场景缓存键中，不复用未调色的媒体转码缓存。
+        encode(source, output, fps, luts=luts)
+        return
     cached = Path(source).with_name(f"{Path(source).stem}-{int(fps)}fps.mp4")
     if not cached.is_file():
         # 预览与导出可能同时转码同一段视频，各自写临时文件后原子替换。
@@ -484,7 +491,8 @@ def render_layer(assets, layer, obj, specs, grade, notes, key, surface_budget=No
     if layer.get("videoSource"):
         if not assets.fast:
             layer["video"]="assets/"+key+".mp4"
-            assets.later(cached_video,layer.pop("videoSource"),assets.stage/layer["video"],assets.fps)
+            args=(layer.pop("videoSource"),assets.stage/layer["video"],assets.fps)
+            assets.later(cached_video,*args,*([layer["_luts"]] if layer.get("_luts") else []))
         layer["asset"]=assets.write(key,finish_frame(base,layer,grade))
         return ["场景内嵌视频"]
     frames = None
@@ -592,7 +600,10 @@ def render_baked(assets, record, layer, grade, key, static, pixel_budget=None):
         layer["image"]=next(frames())
         layer["asset"]=assets.write(key,layer["image"])
     else:
-        layer["sequence"]=assets.sequence(key,frames(),count/record["fps"]*1000)
+        period = round(count/record["fps"]*1000)
+        layer["sequence"]=assets.sequence(key,frames(),period)
+        # 预算抽帧可能留下不等间隔的索引，保留原时间点，逐层周期与小数帧率都不被均分改变。
+        layer["sequence"]["times"]=[round(index/record["fps"]*1000) for index in indices]
         layer["asset"]=layer["sequence"]["frames"][0]
         with Image.open(assets.stage/layer["asset"]) as image:layer["image"]=image.convert("RGBA")
 
@@ -648,6 +659,7 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             depth=state["depth"]
             layer={"id":obj["id"],"name":name,"x":bx+bw/2,"y":by+bh/2,"w":bw,"h":bh,"rotation":0,"flip_y":False,
                    "motion":min(2.,max(.2,1+depth*.45)),"source_depth":depth,"opacity":1,"color":[1,1,1]}
+            if obj.get("_luts"):layer["_luts"]=obj["_luts"]
             budget=None
             if not baked_static[obj["id"]]:
                 budget=int(.88*(ANIMATION_PIXEL_LIMIT-assets.animated_pixels)/max(1,pending_baked+pending_surfaces+pending_frames))
@@ -657,6 +669,7 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             restored.append("逐层完整渲染")
         elif base is not None:
             layer=dict(base)
+            if obj.get("_luts"):layer["_luts"]=obj["_luts"]
             surface_budget = None
             if any(kind in WARP_EFFECTS for kind,_ in specs):
                 remaining = ANIMATION_PIXEL_LIMIT - assets.animated_pixels
@@ -670,6 +683,7 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             except ASSET_ERRORS as exc:
                 notes.append(f"{name} · 动画未生成，{exc}")
                 layer=dict(base)
+                if obj.get("_luts"):layer["_luts"]=obj["_luts"]
                 image=finish_frame(layer["image"],layer,grade)
                 layer["asset"]=assets.write(key+"_static",image)
                 layer["image"]=image
@@ -701,6 +715,7 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                 size=vector_values(obj.get("size"),[300,100])
                 image=source_text(assets,obj,size)
                 layer={"id":obj["id"],"name":name,**geometry(state,size,sh)}
+                if obj.get("_luts"):layer["_luts"]=obj["_luts"]
                 layer["image"]=finish_frame(image,layer,grade)
                 layer["asset"]=assets.write(key,layer["image"],False)
                 result.append(layer)
@@ -714,10 +729,11 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
                     try:
                         size=vector_values(obj.get("size"),[sw,sh])
                         layer={"id":f"{obj['id']}_overlay_{effect_index}","name":name,**geometry(state,size,sh)}
+                        frames=(apply_luts(frame,obj.get("_luts",[])) for frame in cloud_overlay(assets,spec,*size[:2],18))
                         if fast:
-                            layer["asset"]=assets.write(key+"_clouds",next(cloud_overlay(assets,spec,*size[:2],18)))
+                            layer["asset"]=assets.write(key+"_clouds",next(frames))
                         else:
-                            layer["sequence"]=assets.sequence(f"{key}_clouds_{effect_index}",cloud_overlay(assets,spec,*size[:2],18),5600)
+                            layer["sequence"]=assets.sequence(f"{key}_clouds_{effect_index}",frames,5600)
                             layer["asset"]=layer["sequence"]["frames"][0]
                         layer["image"]=Image.open(stage/layer["asset"]).convert("RGBA")
                         result.append(layer)
@@ -729,6 +745,8 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
         # 一个粒子对象可生成多个图层，每层都要带独立的时段权重副本。
         if "_time" in obj:
             for layer in result[first_layer:]:layer["time"]=[point[:] for point in obj["_time"]]
+        if "_curve" in obj:
+            for layer in result[first_layer:]:layer["curve"]=layer_curve(layer,obj["_curve"])
     assets.finish()
     details={"原图层数":len(layers),"粒子图层数":particle_count,"动效位图数":len(assets.saved),"按用户要求忽略的鼠标交互":ignored_mouse,
              "解码像素上界":sum(w*h for w,h in assets.saved.values())}

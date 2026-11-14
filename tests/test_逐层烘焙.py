@@ -72,11 +72,12 @@ def test_layer_plan_main_reports_targets_hidden_and_unsupported(scene_request,mo
     monkeypatch.setattr(sys,'stdout',output)
     bridge.main()
     [result]=json.loads(output.getvalue())['result']
-    # 所有可见图层都逐层渲染（与录制模式同一渲染器），全屏后期层与原时钟文字隐藏。
+    # 调色层交给查色表测量，原时钟文字仍隐藏。
     assert result['targets']==[{'id':1,'name':'普通图层','kind':'image','reason':'完整渲染','motion':1.0},
                                {'id':2,'name':'水波图层','kind':'image','reason':'完整渲染','motion':1.9}]
-    assert result['hidden']==[3,4]
-    assert result['unsupported']==[{'id':3,'name':'全屏后期','reason':'全屏后期效果 bloom 无法逐层还原'}]
+    assert result['hidden']==[4]
+    assert result['unsupported']==[]
+    assert result['adjust']==[{'id':3,'kind':'compose','below':[1,2]}]
 
 
 def test_layer_plan_includes_every_visible_layer_kind(scene_request):
@@ -90,19 +91,21 @@ def test_layer_plan_includes_every_visible_layer_kind(scene_request):
     save_scene(scene_request,scene)
     plan=bridge.layer_plan(scene_request)
     assert [(t['id'],t['kind']) for t in plan['targets']]==[(1,'image'),(2,'image'),(5,'particle'),(7,'text'),(10,'image')]
-    assert plan['hidden']==[3,4,9]
-    assert {u['id'] for u in plan['unsupported']}=={3,9}
+    assert plan['hidden']==[4]
+    assert plan['unsupported']==[]
+    assert plan['adjust']==[{'id':3,'kind':'compose','below':[1,2]},{'id':9,'kind':'compose','below':[1,2,5,7]}]
 
 
 def test_layer_plan_merges_composition_layer_with_single_layer_below(scene_request):
     scene=edit_scene(scene_request)
-    # 只处理背景的模糊合成层与背景合成一层渲染；下方有多个图层的全屏后期层仍隐藏。
+    # 只处理背景的模糊合成层继续合并；其上的调色层处理合并后的目标。
     scene['objects'].insert(1,{'id':9,'name':'背景模糊','image':'models/util/projectlayer.json','effects':[{'file':'effects/blur/effect.json'}]})
     save_scene(scene_request,scene)
     plan=bridge.layer_plan(scene_request)
     assert plan['targets'][0]=={'id':9,'name':'普通图层','kind':'image','reason':'合成层','motion':1.0,'members':[1]}
     assert [t['id'] for t in plan['targets']]==[9,2]
-    assert plan['hidden']==[3,4]
+    assert plan['hidden']==[4]
+    assert plan['adjust']==[{'id':3,'kind':'compose','below':[9,2]}]
     # 随时段变化的图层不并入合成层。
     assert [t['id'] for t in bridge.layer_plan({**scene_request,'varying':[1]})['targets']]==[1,2]
 
@@ -260,3 +263,38 @@ def test_baked_cache_key_tracks_metadata_and_raw_file_changes(scene_request,tmp_
     path.write_bytes(path.read_bytes()[:-1])
     os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns+1_000_000))
     assert bridge.graphic_key(theme,draft,baked)!=original
+
+def test_baked_layers_keep_individual_fractional_rates_in_preview_and_manifest(scene_request,tmp_path,monkeypatch):
+    import 画质压缩
+    monkeypatch.setattr(画质压缩,'fit_layers',lambda *args:{})
+    first=baked_frames(tmp_path,'短周期',count=17)
+    second=baked_frames(tmp_path,'长周期',count=31)
+    first['fps']=17/1.137
+    second['fps']=31/2.413
+    scene_request['baked']={'1':first,'2':second}
+    _,payload=bridge.prepare_graphics(scene_request)
+    for layer,count,period in zip(payload['layers'],[17,31],[1137,2413]):
+        seq=layer['sequence']
+        assert len(seq['frames'])==count and seq['period']==period
+        assert seq['times']==[round(i*period/count) for i in range(count)]
+    result=bridge.export(scene_request)
+    with zipfile.ZipFile(result['path']) as package:
+        manifest=ET.fromstring(package.read('manifest.xml'))
+        for object_id,period in [(1,1137),(2,2413)]:
+            node=manifest.find(f"Image[@name='layer_{object_id}']/SourcesAnimation")
+            assert node.get('loop')=='true'
+            sources=node.findall('Source')
+            assert int(sources[-1].get('time'))==period
+            assert sources[-1].get('src')==sources[0].get('src')
+
+
+def test_baked_budget_sampling_preserves_uneven_source_intervals(scene_request,tmp_path,monkeypatch):
+    record=baked_frames(tmp_path,'预算周期',count=29)
+    record['fps']=29/1.937
+    scene_request['baked']={'1':baked_frames(tmp_path,'静态',static=True),'2':record}
+    monkeypatch.setattr(motion,'ANIMATION_PIXEL_LIMIT',15000)
+    _,payload=bridge.prepare_graphics(scene_request)
+    seq=payload['layers'][1]['sequence']
+    assert len(seq['frames'])==12 and seq['period']==1937
+    assert seq['times']==[round((i*29//12)/record['fps']*1000) for i in range(12)]
+    assert len(set(b-a for a,b in zip(seq['times'],seq['times'][1:])))>1

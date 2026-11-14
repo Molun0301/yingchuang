@@ -1,7 +1,7 @@
 // 独立来源的壁纸渲染页：预览时嵌在编辑器的 iframe 中，录制时由隐藏窗口加载。
 // 壁纸脚本在这里执行，本页不持有任何文件或系统接口。
 import { mount, editorOf, type AudioSource, type SceneInstance, type Source } from '@webwallgl/editor';
-import type { ChildMessage, LiveLoad, LivePatch, LiveTheme, ParentMessage, RecordJob } from './protocol';
+import type { ChildMessage, LiveLoad, LivePatch, LiveTheme, LutResult, ObserveLayer, ObserveRequest, ObserveSnapshot, ParentMessage, RecordJob } from './protocol';
 import { frameScene } from './framing';
 
 type RecorderBridge = {
@@ -10,7 +10,8 @@ type RecorderBridge = {
   ready(): Promise<void>;
   fail(message: string): Promise<void>;
   layer(meta: { id: number; width: number; height: number; count: number; bbox: number[]; still?: boolean }): Promise<void>;
-  done(): Promise<void>;
+  next(snapshot: ObserveSnapshot | null): Promise<ObserveRequest | null>;
+  done(result?: Record<number, LutResult>): Promise<void>;
 };
 declare global { interface Window { recorder?: RecorderBridge } }
 
@@ -113,9 +114,39 @@ function matteBackground() {
   };
 }
 
+type LutTile = { id: number; index: number; x: number; y: number; color: [number, number, number] };
+type LutGrid = { size: number; targets: number[]; tiles: LutTile[]; primary: LutTile[]; checks: LutTile[][] };
+
+/** 在调色层之前铺满标准色块；四角与中心各留五块重复颜色。 */
+function insertLutGrid(scene: { objects: { id: unknown }[] }, target: number, width: number, height: number, grid: LutGrid) {
+  const { size } = grid, count = size ** 3;
+  const columns = Math.ceil(Math.sqrt((count + 25) * width / height)), rows = Math.ceil((count + 25) / columns);
+  const middle = Math.floor((size - 1) / 2);
+  const colors = [0, ((middle * size + middle) * size + middle), count - 1, (size - 1) * size * size + middle, (middle * size + size - 1) * size];
+  const starts = [0, columns - 5, Math.floor(rows / 2) * columns + Math.floor((columns - 5) / 2), (rows - 1) * columns, rows * columns - 5];
+  const reserved = new Map(starts.flatMap(start => colors.map((index, i) => [start + i, index] as const)));
+  grid.checks = colors.map(() => []);
+  let next = 0, id = Math.max(...scene.objects.map(object => Number(object.id))) + 1;
+  const objects = [];
+  for (let slot = 0; slot < rows * columns; slot++) {
+    const repeated = reserved.get(slot), primary = repeated === undefined && next < count;
+    const index = primary ? next++ : repeated ?? 0;
+    const color: [number, number, number] = [index % size, Math.floor(index / size) % size, Math.floor(index / size ** 2)].map(value => value / (size - 1)) as [number, number, number];
+    const x = (slot % columns + 0.5) / columns, y = (Math.floor(slot / columns) + 0.5) / rows;
+    const tile = { id: id++, index, x, y, color };
+    grid.tiles.push(tile);
+    if (primary) grid.primary[index] = tile;
+    if (repeated !== undefined) grid.checks[colors.indexOf(repeated)].push(tile);
+    objects.push({ id: tile.id, image: 'models/util/solidlayer.json', size: `${width / columns} ${height / rows}`,
+      scale: '1 1 1', origin: `${x * width} ${(1 - y) * height} 0`, color: color.join(' '), alpha: 1, visible: true });
+  }
+  scene.objects.splice(scene.objects.findIndex(object => Number(object.id) === target), 0, ...objects);
+}
+
 /** 与 Python 导出的 loaded_scene 相同的覆盖规则 */
-function patchScene(text: string, patch: LivePatch) {
+function patchScene(text: string, patch: LivePatch, lut?: LutGrid) {
   const scene = JSON.parse(text.replace(/^\uFEFF/, ''));
+  liveObjects = scene.objects || [];
   if (patch.transparent) { scene.general ??= {}; scene.general.clearcolor = SENTINEL.join(' '); scene.general.clearenabled = true; }
   if (patch.keep) {
     // 保留目标、上级，以及效果里引用其画面（_rt_imageLayerComposite_<编号>）的图层；被引用的图层即使隐藏也会渲染到合成纹理。
@@ -136,6 +167,11 @@ function patchScene(text: string, patch: LivePatch) {
   const hidden = new Set(patch.hidden.map(String));
   for (const object of scene.objects || []) {
     const id = String(object.id);
+    const state = patch.state?.[id];
+    if (state) {
+      for (const field of ['visible', 'alpha', 'color', 'origin', 'scale', 'angles', 'brightness'] as const) if (field in state) object[field] = state[field];
+      if ('text' in state) object.text = { value: state.text };
+    }
     if (hidden.has(id)) object.visible = false;
     const edit = patch.layers[id];
     if (!edit) continue;
@@ -152,15 +188,30 @@ function patchScene(text: string, patch: LivePatch) {
     if ('rotation' in edit) object.angles = `0 0 ${-Number(edit.rotation) * Math.PI / 180}`;
     if ('scale' in edit) object.scale = numbers(object.scale, [1, 1, 1]).map(value => value * Number(edit.scale)).join(' ');
   }
+  if (lut) {
+    // 测量时用普通可见值替换脚本绑定，防止隐藏后又被下一帧脚本显示。
+    for (const object of scene.objects) if (lut.targets.includes(Number(object.id))) object.visible = true;
+    insertLutGrid(scene, lut.targets[0], width, height, lut);
+  }
   return new TextEncoder().encode(JSON.stringify(scene));
 }
 
-function sourceFor({ theme, patch }: LiveLoad): Source {
-  const project = theme.project as { file?: string; type?: string };
+function sourceFor({ theme, patch }: LiveLoad, lut?: LutGrid): Source {
+  const project = theme.project as { file?: string; type?: string;
+    general?: { properties?: Record<string, { type?: string; options?: { label: string; value: string | number }[] }> } };
   const entry = /\.json$/i.test(theme.file) ? theme.file : 'scene.json';
   return {
-    key: theme.key + ':' + JSON.stringify(patch),
-    project: async () => ({ ...project, type: theme.type }),
+    key: theme.key + ':' + JSON.stringify(patch) + (lut ? ':lut:' + lut.size : ''),
+    project: async () => {
+      const result = structuredClone({ ...project, type: theme.type });
+      // 补入不会被选中的非整数占位值，避免 WebWallGL 将作者定义的整数字符串选项转成数字。
+      for (const property of Object.values(result.general?.properties ?? {})) {
+        if (property.type === 'combo' && property.options?.length && property.options.every(({ value }) => typeof value === 'string' && /^-?\d+$/.test(value.trim()))) {
+          property.options.push({ label: '', value: '__preserve_string__' });
+        }
+      }
+      return result;
+    },
     scenePkg: async () => { throw new Error('场景改由目录读取器装配'); },
     sceneDir: async signal => {
       const files = await packageOf(theme);
@@ -176,7 +227,7 @@ function sourceFor({ theme, patch }: LiveLoad): Source {
         if (!value && !files) value = await fetchBytes(theme.base + encodePath(name), abort);
         // 引擎目录只补散装工程引用的内置特效；公共着色器头与内置粒子贴图由渲染器自带的重建版本处理，官方原文件与其不兼容。
         if (!value && theme.engine && ENGINE_FALLBACK.test(key)) value = await fetchBytes(theme.engine + encodePath(name), abort);
-        if (value && key === normal(entry)) value = patchScene(new TextDecoder().decode(value), patch);
+        if (value && key === normal(entry)) value = patchScene(new TextDecoder().decode(value), patch, lut);
         cache.set(key, value);
         return value;
       };
@@ -194,10 +245,12 @@ function wallpaperProperties(values: Record<string, unknown>) {
     !key.startsWith('__') && ['string', 'number', 'boolean'].includes(typeof value) && !(typeof value === 'string' && /^([a-z]:[\\/]|\/)/i.test(value)))) as Record<string, string | number | boolean>;
 }
 
-async function load(input: LiveLoad) {
+async function load(input: LiveLoad, lut?: LutGrid) {
+  // 壁纸脚本在载入时拿到当时的 Date；先换成可调的模拟时钟（与真实时间一致），之后拖动预览时刻才能影响已载入的脚本。
+  if (globalThis.Date === RealDate) fixClock((RealDate.now() - midnight.getTime()) / 60000);
   const serial = ++loadSerial, started = performance.now();
   const options = {
-    source: sourceFor(input), fit: 'stretch' as const, renderDpr: input.dpr, properties: wallpaperProperties(input.properties),
+    source: sourceFor(input, lut), fit: 'stretch' as const, renderDpr: input.dpr, properties: wallpaperProperties(input.properties),
     audio, media: null, volume: 0, autoplay: input.playing, autoQuality: false, mountTimeoutMs: 60000,
     // FXAA 后处理会把整幅透明度写成不透明，逐层烘焙时关闭以保留图层透明区域。
     quality: { antiAliasing: input.patch.transparent ? 'off' as const : 'fxaa' as const, particles: 'high' as const, postProcessing: 'high' as const },
@@ -211,7 +264,8 @@ async function load(input: LiveLoad) {
     const created = await mount(stage, options);
     if (serial !== loadSerial) { created.destroy({ releasePkgCache: true }); return null; }
     instance = created;
-    post({ type: 'ready', info: created.info, ms: Math.round(performance.now() - started) });
+    parallaxNodes = parallaxPlan(liveObjects); parallaxApplied = '';
+    post({ type: 'ready', info: created.info && { ...created.info, maxMotion: Math.max(1, ...parallaxNodes.filter(node => node.drawn).map(node => node.motion)) }, ms: Math.round(performance.now() - started) });
     return created;
   } catch (error) {
     if (serial === loadSerial) post({ type: 'error', message: (error as Error).message });
@@ -221,6 +275,62 @@ async function load(input: LiveLoad) {
   }
 }
 
+// —— 编辑器图层模式的实时预览：逐层感应与预览时刻 ——
+type SceneObject = Record<string, unknown> & { id: number; parent?: number | null };
+type ParallaxNode = { id: number; parent: number | null; motion: number; movable: boolean; drawn: boolean };
+let liveObjects: SceneObject[] = [], parallaxNodes: ParallaxNode[] = [], parallaxApplied = '';
+const parallaxBase = new Map<number, number[]>();
+
+/** 与转换核心一致：景深取自身 parallaxDepth 的 x，未设置时沿用上级；感应倍数 = clamp(1 + 景深 × 0.45, 0.2, 2)。 */
+function parallaxPlan(objects: SceneObject[]): ParallaxNode[] {
+  parallaxBase.clear();
+  const byId = new Map(objects.map(object => [Number(object.id), object])), depths = new Map<number, number>();
+  const depthOf = (object: SceneObject): number => {
+    const id = Number(object.id);
+    if (!depths.has(id)) {
+      const parent = object.parent != null ? byId.get(Number(object.parent)) : undefined;
+      depths.set(id, numbers(object.parallaxDepth, [parent ? depthOf(parent) : 0, 0])[0]);
+    }
+    return depths.get(id)!;
+  };
+  const bound = (value: unknown) => Boolean(value && typeof value === 'object' && ('script' in value || 'animation' in value));
+  return objects.map(object => ({ id: Number(object.id), parent: object.parent != null ? Number(object.parent) : null,
+    motion: Math.min(2, Math.max(0.2, 1 + depthOf(object) * 0.45)), movable: !bound(object.origin),
+    drawn: 'image' in object || 'particle' in object || 'text' in object }));
+}
+
+/** 按手机图层模式移动各层：每层的世界位移 = 倾斜量 × 自身倍数；子层只补与上级已移动量的差值，脚本或时间轴控制位置的层保持不动。 */
+async function applyParallax(x: number, y: number) {
+  const control = instance && editorOf(instance);
+  const key = x.toFixed(2) + ',' + y.toFixed(2);
+  if (!control || key === parallaxApplied) return;
+  parallaxApplied = key;
+  const byId = new Map(parallaxNodes.map(node => [node.id, node])), moved = new Map<number, number>();
+  const world = (id: number | null): number => {
+    if (id === null || !byId.has(id)) return 0;
+    if (!moved.has(id)) { const node = byId.get(id)!; moved.set(id, node.movable ? node.motion : world(node.parent)); }
+    return moved.get(id)!;
+  };
+  const changes: Promise<void>[] = [];
+  for (const node of parallaxNodes) {
+    if (!node.movable) continue;
+    if (!parallaxBase.has(node.id)) { const origin = control.getLayerProps(node.id)?.origin; if (!origin) continue; parallaxBase.set(node.id, [...origin]); }
+    const base = parallaxBase.get(node.id)!, local = node.motion - world(node.parent);
+    changes.push(control.setLayerProps(node.id, { origin: [base[0] + x * local, base[1] - y * local, base[2]] }));
+  }
+  await Promise.all(changes);
+}
+
+/** 预览时刻：模拟时钟只往前走（回到更早时刻时换成之后某天的同一时刻），避开渲染器按秒、按日缓存的时刻。 */
+let previewDay = 0;
+function setPreviewClock(minute: number | null) {
+  const real = new RealDate(), target = minute ?? real.getHours() * 60 + real.getMinutes() + real.getSeconds() / 60;
+  const current = (Date.now() - midnight.getTime()) / 60000;
+  // 回到当前时间且时钟未被拨动过时（相差几秒内）留在今天，不换到第二天。
+  while (previewDay * 1440 + target < current - .05) previewDay++;
+  fixClock(target, previewDay);
+}
+
 function receive(event: MessageEvent<ParentMessage>) {
   if (event.source !== parent || !event.data || typeof event.data !== 'object') return;
   const message = event.data;
@@ -228,6 +338,8 @@ function receive(event: MessageEvent<ParentMessage>) {
   if (message.type === 'properties') instance?.setProperties(wallpaperProperties(message.properties));
   if (message.type === 'playing') { if (message.playing) instance?.resume(); else instance?.pause(); }
   if (message.type === 'dpr') instance?.setRenderDpr(message.dpr);
+  if (message.type === 'parallax') void applyParallax(message.x, message.y);
+  if (message.type === 'clock') setPreviewClock(message.minute);
   if (message.type === 'audio') {
     for (let i = 0; i < 64; i++) { bands.left[i] = Number(message.left[i]) || 0; bands.right[i] = Number(message.right[i]) || 0; }
   }
@@ -426,6 +538,107 @@ function changedPixels(a: Uint8Array, b: Uint8Array) {
   return changed;
 }
 
+/** 分块累计预乘颜色与透明度；透明边缘的无效颜色不参与周期搜索。 */
+function bakeSignature(data: Uint8Array, width: number, height: number) {
+  const columns = Math.min(32, width), rows = Math.min(32, height), signature = new Float32Array(columns * rows * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const source = (y * width + x) * 4, target = (Math.floor(y * rows / height) * columns + Math.floor(x * columns / width)) * 4;
+    const alpha = data[source + 3] / 255;
+    for (let channel = 0; channel < 3; channel++) signature[target + channel] += data[source + channel] * alpha;
+    signature[target + 3] += data[source + 3];
+  }
+  const area = width * height / (columns * rows);
+  for (let i = 0; i < signature.length; i++) signature[i] /= area;
+  return signature;
+}
+
+function bakeDistance(a: Float32Array, b: Float32Array) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += (a[i] - b[i]) ** 2;
+  return sum / a.length;
+}
+
+/** 在采样帧之间搜索小数位移；比较整个观察段，不能只凭首帧相似就认定周期。 */
+function bakeCandidates(samples: Float32Array[], fps: number) {
+  const minimum = fps * .5, maximum = samples.length - 1 - fps;
+  let motion = 0;
+  for (let i = 1; i < samples.length; i++) motion += bakeDistance(samples[i - 1], samples[i]);
+  motion /= samples.length - 1;
+  if (!motion) return [];
+  const error = (lag: number) => {
+    const whole = Math.floor(lag), fraction = lag - whole, last = samples.length - 2 - Math.ceil(lag);
+    let sum = 0, count = 0;
+    for (let index = 0; index <= last; index++) {
+      const a = samples[index], b = samples[index + whole], c = samples[index + whole + 1];
+      for (let k = 0; k < a.length; k++) sum += (a[k] - b[k] - (c[k] - b[k]) * fraction) ** 2;
+      count += a.length;
+    }
+    return sum / count / motion;
+  };
+  const candidates: { period: number; error: number }[] = [];
+  for (let lag = Math.floor(minimum); lag <= Math.ceil(maximum); lag++) {
+    const center = Math.max(minimum, Math.min(maximum, lag)), score = error(center);
+    if (center > minimum && score > error(Math.max(minimum, center - 1))) continue;
+    if (center < maximum && score > error(Math.min(maximum, center + 1))) continue;
+    let left = Math.max(minimum, center - 1), right = Math.min(maximum, center + 1);
+    for (let i = 0; i < 16; i++) {
+      const a = left + (right - left) / 3, b = right - (right - left) / 3;
+      if (error(a) < error(b)) right = b; else left = a;
+    }
+    const refined = (left + right) / 2, best = score < error(refined) ? center : refined, distance = error(best);
+    // 相似度必须明显好于相邻帧，排除随机画面和仅仅变化缓慢的长动画。
+    if (distance < .6) candidates.push({ period: best / fps, error: distance });
+  }
+  return candidates.sort((a, b) => a.period - b.period);
+}
+
+/** 用真实渲染细化到毫秒，并以完整像素在五个相位复核；按从短到长的顺序选最小周期。 */
+async function detectBakePeriod(samples: Float32Array[], fps: number, width: number, height: number,
+  frameAt: (seconds: number) => Promise<Uint8Array>, limit: number) {
+  const duration = (samples.length - 1) / fps;
+  for (const candidate of bakeCandidates(samples, fps)) {
+    const offsets = [0, .193, .417, .691, 1].map(part => part * (duration - candidate.period - 1 / fps));
+    const reference = [];
+    for (const offset of offsets) reference.push(await frameAt(offset));
+    let period = candidate.period;
+    if (candidate.error > 1e-10) {
+      // 选择变化最明显的一小段，用到两端画面的距离差定义相位。连续运动与阶跃换帧都能定位交点，
+      // 避免插值误差把半帧周期筛掉，也避免平坦误差区让极值搜索误选二倍周期。
+      let index = 0, largest = -1;
+      const last = Math.floor((duration - period - 1 / fps) * fps);
+      for (let i = 0; i <= last; i++) {
+        const distance = bakeDistance(samples[i], samples[i + 1]);
+        if (distance > largest) { largest = distance; index = i; }
+      }
+      const from = index / fps, to = (index + 1) / fps;
+      const a = bakeSignature(await frameAt(from), width, height), b = bakeSignature(await frameAt(to), width, height);
+      const phase = async (at: number) => {
+        const value = bakeSignature(await frameAt(at), width, height);
+        return bakeDistance(value, a) - bakeDistance(value, b);
+      };
+      const crossing = async (left: number, right: number) => {
+        for (let i = 0; i < 13; i++) {
+          const middle = (left + right) / 2;
+          if (await phase(middle) < 0) left = middle; else right = middle;
+        }
+        return (left + right) / 2;
+      };
+      const left = from + period - 1 / fps, right = to + period + 1 / fps;
+      if (await phase(left) > 0 || await phase(right) < 0) continue;
+      period = await crossing(left, right) - await crossing(from, to);
+    }
+    // 背屏动画使用毫秒时间点；取帧时就采用同一个周期，避免写包时再截断时长。
+    period = Math.round(period * 1000) / 1000;
+    if (period < .5 || period > duration - 1) continue;
+    let matches = true;
+    for (let i = 0; i < offsets.length; i++) {
+      if (changedPixels(reference[i], await frameAt(offsets[i] + period)) > limit) { matches = false; break; }
+    }
+    if (matches) return period;
+  }
+  return null;
+}
+
 /**
  * 逐层烘焙：同一场景实例里每次只显示一个目标图层（祖先保留可见但透明），透明底逐帧出图。
  * 渲染器按预乘透明度写入画布，读出后除以透明度还原；按所有帧的内容范围裁切后送出。
@@ -457,32 +670,45 @@ async function bake(bridge: RecorderBridge, job: RecordJob) {
       for (const member of together) for (let id = parents.get(member); id != null; id = parents.get(id) ?? null) ancestors.add(id);
       for (const layer of layers) {
         const props = original.get(layer.id);
-        // 目标与上级保留渲染器自身算出的可见性（脚本隐藏的图层在录制模式里同样不显示），上级只是不画自身。
+        // 图片类上级的透明度不传给子层，设为 0 只隐藏自身；合成层、全屏层等把子层画进自身缓冲，需保持原透明度。
         if (together.has(layer.id)) await control.setLayerProps(layer.id, { visible: props?.visible ?? true, alpha: props?.alpha ?? 1 });
-        else if (ancestors.has(layer.id)) await control.setLayerProps(layer.id, { visible: props?.visible ?? true, alpha: 0 });
+        else if (ancestors.has(layer.id)) await control.setLayerProps(layer.id, { visible: props?.visible ?? true, alpha: layer.kind === 'image' ? 0 : props?.alpha ?? 1 });
         else if (layer.visible) await control.setLayerProps(layer.id, { visible: false });
       }
-      const particle = !!job.particles?.includes(target);
-      matte.clear = particle ? 'transparent' : 'black';
+      let single = !!job.particles?.includes(target);
+      matte.clear = single ? 'transparent' : 'black';
       for (let i = 0; i < job.warmup; i++) { time += 1 / job.fps; await control.seek(time); }
-      const frames: Uint8Array[] = [];
-      let left = W, top = H, right = -1, bottom = -1;
-      for (let i = 0; i < job.frames; i++) {
-        time += 1 / job.fps;
-        if (particle) {
-          await control.seek(time);
-          matting.copy();
-        } else {
-          matte.clear = 'black'; await control.seek(time);
-          matting.copy();
+      if (!single) {
+        // 同一时刻黑底连渲两次：画面不一致说明这一层每次渲染都带随机成分（与粒子相同），
+        // 黑白两次抠图会把差异算成透明小洞（孤独の少女人物层），改用透明底单次渲染。
+        await control.seek(time); matting.copy();
+        await control.seek(time + 1e-4); matting.copy(true);
+        const probe = matting.frame(false);
+        let differ = 0;
+        for (let i = 3; i < probe.length; i += 4) if (probe[i] < 200) differ++;
+        single = differ > 2;
+        matte.clear = single ? 'transparent' : 'black';
+      }
+      const frames: Uint8Array[] = [], samples: Float32Array[] = [];
+      const start = time + 1 / job.fps, { probeFrames, fade } = job as RecordJob & { probeFrames: number; fade: number };
+      const frameAt = async (seconds: number) => {
+        const at = start + seconds;
+        if (single) { await control.seek(at); matting.copy(); }
+        else {
+          matte.clear = 'black'; await control.seek(at); matting.copy();
           // 白底那次只推进万分之一秒，脚本与动画状态几乎不变。
-          matte.clear = 'white'; await control.seek(time + 1e-4);
-          matting.copy(true);
-          matte.clear = 'black';
+          matte.clear = 'white'; await control.seek(at + 1e-4); matting.copy(true); matte.clear = 'black';
         }
-        const data = matting.frame(particle);
-        frames.push(data);
-        // 内容范围：每行找第一个与最后一个不透明像素。
+        return matting.frame(single);
+      };
+      let left = W, top = H, right = -1, bottom = -1, fallbackBounds: number[] = [];
+      // 粒子和每次渲染都带随机成分的图层不会逐像素重复，只取原来的帧数，不做长观察与周期搜索。
+      const observe = single ? job.frames : probeFrames;
+      for (let i = 0; i < observe; i++) {
+        const data = await frameAt(i / job.fps);
+        // 只保留原来四秒加淡化的完整帧，长观察段只存分块特征，内存不随上限时长增长。
+        if (i < job.frames) frames.push(data);
+        samples.push(bakeSignature(data, W, H));
         for (let y = 0; y < H; y++) {
           const row = y * W * 4;
           let x = 0;
@@ -492,12 +718,22 @@ async function bake(bridge: RecorderBridge, job: RecordJob) {
           while (!data[row + end * 4 + 3]) end--;
           if (x < left) left = x; if (end > right) right = end; if (y < top) top = y; if (y > bottom) bottom = y;
         }
+        if (i === job.frames - 1) fallbackBounds = [left, top, right, bottom];
         if (i === job.fps * 2 && changedPixels(frames[0], frames[job.fps]) <= limit && changedPixels(frames[0], data) <= limit) { frames.length = 1; break; }
       }
+      const still = frames.length === 1;
+      const period = still || single ? null : await detectBakePeriod(samples, job.fps, W, H, frameAt, limit);
+      if (!still && period === null) [left, top, right, bottom] = fallbackBounds;
+      time = start + (samples.length - 1) / job.fps;
       if (right < 0) { await bridge.layer({ id: target, width: 0, height: 0, count: 0, bbox: [] }); continue; }
       const width = right - left + 1, height = bottom - top + 1;
-      await bridge.layer({ id: target, width, height, count: frames.length, bbox: [left / scale, top / scale, width / scale, height / scale], still: frames.length === 1 });
-      for (const data of frames) {
+      const count = period === null ? frames.length : Math.round(period * job.fps), fps = period === null ? job.fps : count / period;
+      const meta = { id: target, width, height, count, fps, period, fade: still || period !== null ? 0 : fade,
+        bbox: [left / scale, top / scale, width / scale, height / scale], still };
+      await bridge.layer(meta);
+      if (period !== null) frames.length = 0;
+      for (let i = 0; i < count; i++) {
+        const data = period === null ? frames[i] : await frameAt(i / fps);
         const cropped = new Uint8Array(width * height * 4);
         for (let y = 0; y < height; y++) cropped.set(data.subarray(((top + y) * W + left) * 4, ((top + y) * W + left + width) * 4), y * width * 4);
         await bridge.frame(cropped);
@@ -507,21 +743,157 @@ async function bake(bridge: RecorderBridge, job: RecordJob) {
   } finally { matting.destroy(); }
 }
 
-/** 让壁纸按当天指定分钟运行：时钟从该时刻起正常走动，随时段变化的脚本与特效呈现对应状态 */
-function fixClock(minute: number) {
-  const RealDate = Date, midnight = new RealDate();
-  midnight.setHours(0, 0, 0, 0);
-  const origin = midnight.getTime() + minute * 60000, started = performance.now();
-  const now = () => origin + performance.now() - started;
+const RealDate = Date, midnight = new RealDate();
+midnight.setHours(0, 0, 0, 0);
+let clockOrigin = 0, clockStarted = 0;
+const clockNow = () => clockOrigin + performance.now() - clockStarted;
+
+/** 可重复设置的模拟时钟：以真实日期的零点为基准，设置后继续随真实时间走动。 */
+function fixClock(minute: number, day = 0) {
+  clockOrigin = midnight.getTime() + day * 86400000 + minute * 60000;
+  clockStarted = performance.now();
   (globalThis as { Date: DateConstructor }).Date = class extends RealDate {
-    constructor(...args: unknown[]) { super(...((args.length ? args : [now()]) as [number])); }
-    static now() { return now(); }
+    constructor(...args: unknown[]) { super(...((args.length ? args : [clockNow()]) as [number])); }
+    static now() { return clockNow(); }
   } as DateConstructor;
+}
+
+const observeTolerance = { visible: 0, effective: 0, origin: 0.5, scale: 0.004, angles: 0.001, alpha: 0.004, color: 0.004, brightness: 0.004 };
+
+/** 完整场景先读完资源，再按请求逐个设置时钟；分组与普通图层采用相同的属性读取接口。 */
+async function observe(bridge: RecorderBridge, job: RecordJob) {
+  let request = await bridge.next(null);
+  if (!request) { await bridge.done(); return; }
+  const now = performance.now.bind(performance);
+  let clockOffset = 1000;
+  // 每个请求推进一秒渲染时钟，让 engine.timeOfDay 的按秒缓存立即刷新。
+  performance.now = () => now() + clockOffset;
+  fixClock(request.minute, request.day);
+  Object.assign(stage.style, { width: job.full.width + 'px', height: job.full.height + 'px' });
+  const scene = await load({ ...job, patch: { ...job.patch, keep: undefined }, playing: true, dpr: 1 });
+  if (!scene) throw new Error('壁纸未能加载');
+  const control = editorOf(scene)!;
+  const started = performance.now();
+  while (performance.now() - started < 2500 || performance.now() - lastRead < 1000) {
+    if (performance.now() - started > 20000) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  scene.pause();
+  const read = (): ObserveLayer[] => control.getLayers().map(layer => ({
+    id: layer.id, kind: layer.kind, effective: layer.visible, ...control.getLayerProps(layer.id)!,
+  }));
+  // 已发现的动画字段继续读取和报告，后续采样只跳过它们的稳定判断。
+  const animated = new Set<string>();
+  let time = control.time;
+  while (request) {
+    let previous = read(), consecutive = 0;
+    const stable = new Map(previous.map(layer => [layer.id, Object.fromEntries(Object.keys(observeTolerance).map(field => [field, 0]))]));
+    for (let step = 0; step < 15 && consecutive < 2; step++) {
+      time += 0.2;
+      await control.seek(time);
+      const current = read(), before = new Map(previous.map(layer => [layer.id, layer]));
+      let unchanged = true;
+      for (const layer of current) {
+        const last = before.get(layer.id)!, fields = stable.get(layer.id)!;
+        for (const field of Object.keys(observeTolerance) as (keyof typeof observeTolerance)[]) {
+          const value = layer[field], old = last[field];
+          const same = Array.isArray(value)
+            ? value.every((item, i) => Math.abs(item - (old as number[])[i]) <= observeTolerance[field])
+            : Math.abs(Number(value) - Number(old)) <= observeTolerance[field];
+          fields[field] = same ? fields[field] + 1 : 0;
+          if (!same && !animated.has(`${layer.id}:${field}`)) unchanged = false;
+        }
+      }
+      consecutive = unchanged ? consecutive + 1 : 0;
+      previous = current;
+    }
+    const unstable = Object.fromEntries([...stable].map(([id, fields]): [number, string[]] => [id, Object.keys(fields).filter(field => fields[field] < 2)]).filter(([, fields]) => fields.length));
+    for (const [id, fields] of Object.entries(unstable)) for (const field of fields) animated.add(`${id}:${field}`);
+    request = await bridge.next({ ...request, layers: previous, unstable });
+    if (request) {
+      clockOffset += 1000;
+      fixClock(request.minute, request.day);
+    }
+  }
+  await bridge.done();
+}
+
+/** 直接读取最终 WebGL 画面，避免二维画布在复制时进行颜色与透明度换算。 */
+function lutPixels(canvas: HTMLCanvasElement) {
+  const gl = canvas.getContext('webgl2')!, read = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+  try {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    return pixels;
+  } finally { gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read); }
+}
+
+/** 隐藏全部调色层校准输入，再逐个显示目标测输出，共用色块与窗口。 */
+async function measureLut(bridge: RecorderBridge, job: RecordJob) {
+  Object.assign(stage.style, { width: job.full.width + 'px', height: job.full.height + 'px' });
+  const targets = job.lut!.targets ?? [job.patch.keep![0]];
+  const grid: LutGrid = { size: job.lut!.size, targets, tiles: [], primary: [], checks: [] };
+  const scene = await load({ ...job, patch: { ...job.patch, keep: targets }, playing: true, dpr: 1 }, grid);
+  if (!scene) throw new Error('壁纸未能加载');
+  const control = editorOf(scene)!;
+  const started = performance.now();
+  while (performance.now() - started < 2500 || performance.now() - lastRead < 1000) {
+    if (performance.now() - started > 20000) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  scene.pause();
+  await Promise.all(targets.map(target => control.setLayerProps(target, { visible: false })));
+  const canvas = scene.canvas, W = canvas.width, H = canvas.height;
+  const sample = (pixels: Uint8Array, tile: LutTile, channel: number) => pixels[(Math.floor((1 - tile.y) * H) * W + Math.floor(tile.x * W)) * 4 + channel];
+  let input = lutPixels(canvas), inputError = 0;
+  for (const tile of grid.tiles) for (let c = 0; c < 3; c++) inputError = Math.max(inputError, Math.abs(sample(input, tile, c) - tile.color[c] * 255));
+  const low = grid.tiles.map(() => [0, 0, 0]), high = grid.tiles.map(() => [1, 1, 1]);
+  const values = grid.tiles.map(tile => [...tile.color] as [number, number, number]);
+  for (let step = 0; step < 12; step++) {
+    const changes: Promise<void>[] = [];
+    grid.tiles.forEach((tile, i) => {
+      let changed = false;
+      for (let c = 0; c < 3; c++) {
+        const actual = sample(input, tile, c), nominal = tile.color[c] * 255;
+        if (Math.abs(actual - nominal) <= 0.5) continue;
+        if (actual < nominal) low[i][c] = values[i][c]; else high[i][c] = values[i][c];
+        values[i][c] = (low[i][c] + high[i][c]) / 2;
+        changed = true;
+      }
+      if (changed) changes.push(control.setLayerProps(tile.id, { color: values[i] }));
+    });
+    if (!changes.length) break;
+    // 同一轮的所有颜色一起写入，只让渲染器补画一帧。
+    await Promise.all(changes);
+    input = lutPixels(canvas);
+  }
+  const results: Record<number, LutResult> = {};
+  for (const target of targets) {
+    await control.setLayerProps(target, { visible: true });
+    const output = lutPixels(canvas), table = new Array<number>(grid.size ** 3 * 3);
+    for (const tile of grid.primary) for (let c = 0; c < 3; c++) table[tile.index * 3 + c] = sample(output, tile, c);
+    // 轮廓使用渲染器已经合成上级变换后的屏幕坐标，判断调色层是否覆盖四个画布角。
+    const corners = control.getLayerOutline(target)?.corners;
+    let positional = !corners || ![[0, 0], [canvas.clientWidth, 0], [canvas.clientWidth, canvas.clientHeight], [0, canvas.clientHeight]].every(([x, y]) => {
+      const cross = corners.map((a, i) => { const b = corners[(i + 1) % corners.length]; return (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]); });
+      return cross.every(value => value >= -0.01) || cross.every(value => value <= 0.01);
+    });
+    for (const tiles of grid.checks) for (let c = 0; c < 3; c++) {
+      const colors = [table[tiles[0].index * 3 + c], ...tiles.map(tile => sample(output, tile, c))];
+      if (Math.max(...colors) - Math.min(...colors) > 3) positional = true;
+    }
+    results[target] = { size: grid.size, table, positional, inputError };
+    await control.setLayerProps(target, { visible: false });
+  }
+  await bridge.done(results);
 }
 
 async function record(bridge: RecorderBridge) {
   const job = await bridge.job();
+  if (job.mode === 'observe') return observe(bridge, job);
   if (job.minute !== undefined) fixClock(job.minute);
+  if (job.mode === 'lut') return measureLut(bridge, job);
   if (job.mode === 'capture') return capture(bridge, job);
   if (job.mode === 'bake') { matteBackground(); return bake(bridge, job); }
   const step = job.mode === 'step';

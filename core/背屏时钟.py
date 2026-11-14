@@ -330,7 +330,8 @@ def widget_tokens(key, row):
         text = (row.get("text") or WIDGETS["text"]["sample"]).strip()[:40]
         return [("s", text)] if text else []
     spec = WIDGETS[key]
-    text = spec["format"] if row.get("label", True) else spec["bare"]
+    mode = "format" if row.get("label", True) else "bare"
+    text = spec[mode + "_en" if spec.get("lang") and row.get("language") == "en" else mode]
     tokens, position = [], 0
     for match in TOKEN.finditer(text):
         if match.start() > position:
@@ -343,9 +344,13 @@ def widget_tokens(key, row):
     return tokens
 
 
-def token_glyphs(tokens):
+def field_choices(field, language):
+    return FIELDS[field]["choices_en" if language == "en" else "choices"]
+
+
+def token_glyphs(tokens, language="zh"):
     text = "".join(token[1] for token in tokens if token[0] == "s")
-    text += "".join(choice for token in tokens if token[0] == "c" for choice in FIELDS[token[1]]["choices"])
+    text += "".join(choice for token in tokens if token[0] == "c" for choice in field_choices(token[1], language))
     numbers = [token for token in tokens if token[0] == "n"]
     if numbers:
         text += "0123456789"
@@ -356,11 +361,11 @@ def token_glyphs(tokens):
     return "".join(dict.fromkeys(text))
 
 
-def seq_row(stage, font, key, tokens, color):
+def seq_row(stage, font, key, tokens, color, language="zh"):
     """组件行：固定文字、可变位数数字与选项文字依次排列，背屏端按实际数值计算位置。"""
     numbers = [token for token in tokens if token[0] == "n"]
     probe = [token[1] for token in tokens if token[0] == "s" and token[1].strip()]
-    probe += [choice for token in tokens if token[0] == "c" for choice in FIELDS[token[1]]["choices"]]
+    probe += [choice for token in tokens if token[0] == "c" for choice in field_choices(token[1], language)]
     if numbers:
         probe.append("0123456789")
     if any(token[2] for token in numbers):probe.append(".")
@@ -390,9 +395,10 @@ def seq_row(stage, font, key, tokens, color):
             row["segments"].append({"t": "s", "asset": file, "w": write_text(stage, file, token[1], font, height, bounds, color)})
             assets.append(file)
         elif token[0] == "c":
-            files = [f"assets/w_{key}_c{index}_{i}.png" for i in range(len(FIELDS[token[1]]["choices"]))]
+            choices = field_choices(token[1], language)
+            files = [f"assets/w_{key}_c{index}_{i}.png" for i in range(len(choices))]
             widths = [write_text(stage, file, text, font, height, bounds, color)
-                      for file, text in zip(files, FIELDS[token[1]]["choices"])]
+                      for file, text in zip(files, choices)]
             row["segments"].append({"t": "c", "f": token[1], "src": f"assets/w_{key}_c{index}.png", "assets": files, "ws": widths})
             assets += files
         else:
@@ -424,8 +430,9 @@ def entry_for(selected, key):
 
 
 def build_clock(stage, config, selected):
-    words = WEEK_ZH if config["星期语言"] == "中文" else WEEK_EN
     layout = config.get("时钟排版", {})
+    week_language = layout.get("week", {}).get("language", "zh" if config["星期语言"] == "中文" else "en")
+    words = WEEK_ZH if week_language == "zh" else WEEK_EN
     defaults = {"week": 43, "date": 34, "time": 62 if config["显示秒"] else 69}
     glyphs = {"week": "".join(words), "date": "0123456789.", "time": "0123456789:"}
     rows, assets, audit, warnings = [], [], {}, []
@@ -435,11 +442,12 @@ def build_clock(stage, config, selected):
     for key in keys:
         spec = WIDGETS[key]
         custom = layout.get(key, {})
+        language = week_language if key == "week" else custom.get("language", "zh")
         size = int(round(custom.get("size", defaults.get(key, spec["size"]))))
         tokens = None if key in CORE_KEYS else widget_tokens(key, custom)
         if tokens is not None and not tokens:
             continue
-        needed = glyphs[key] if tokens is None else token_glyphs(tokens)
+        needed = glyphs[key] if tokens is None else token_glyphs(tokens, language)
         data, source = entry_for(selected, key)
         if source.get("选取规则") == "跟随时间字体":
             # 跟随时间行实际采用的字体，只为组件自身缺字生成提醒。
@@ -476,11 +484,12 @@ def build_clock(stage, config, selected):
             row = number_row(stage, font, "time", fields, ":", color)
             row["hourFormat"] = config.get("时制", "24")
         else:
-            row, files = seq_row(stage, font, key, tokens, color)
+            row, files = seq_row(stage, font, key, tokens, color, language)
             assets += files
         if key in ("date", "time"):
             assets += row["digits"] + [part["asset"] for part in row["pieces"] if "asset" in part]
         row["size"] = size
+        row["language"] = language
         rows.append(row)
     # 三行时钟的默认竖向排布，仅在没有逐行排版时使用。
     core = [row for row in rows if row["key"] in CORE_KEYS]

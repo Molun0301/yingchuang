@@ -10,10 +10,12 @@ const samples=Object.fromEntries(Object.entries(definitions.fields).filter(([,fi
 /** live 存在时为完整画面模式：画布透明，只绘制时钟与辅助线，并把取景位置同步给下方的实时渲染层 */
 type Props = { preview: Preview|null; draft: Draft; device: Device; poster: string; playing: boolean; tilt: boolean; mask: boolean;
   selected: RowKey|null; onSelect:(key:RowKey|null)=>void; onLayout:(layout:Layout)=>void; onReady:()=>void;onError:(message:string)=>void;
-  live?: { ready: boolean };
+  /** layered：图层模式，渲染页按 motion（最大感应倍数）取景，倾斜时由 parallax 逐层移动，不整幅平移 */
+  live?: { ready: boolean; layered?: boolean; motion?: number; parallax?: (x:number,y:number)=>void };
   /** 预览一天中的这一分钟；未指定时跟随当前时间 */
   minute?: number|null };
 type Box = { key:RowKey; x:number; y:number; w:number; h:number };
+type CurveLayer = SceneLayer & { curve?: Partial<Record<'alpha'|'dx'|'dy'|'sx'|'sy'|'rot',number[][]>> };
 const clamp=(value:number,min=0,max=1)=>Math.max(min,Math.min(max,value));
 
 /** 镜头以机型像素绘制并缓存；细金属圈、镜筒与微弱镀膜反光保持克制。 */
@@ -142,7 +144,7 @@ export function PreviewCanvas(props:Props) {
       if(node.width!==device.width)node.width=device.width;if(node.height!==device.height)node.height=device.height;
       const width=node.width,height=node.height;
       ctx.clearRect(0,0,width,height);if(!live){ctx.fillStyle=preview.background??'#111b2b';ctx.fillRect(0,0,width,height);}
-      const maximum=Math.max(1,...preview.layers.map(l=>l.motion));
+      const maximum=Math.max(1,live?.motion??1,...preview.layers.map(l=>l.motion));
       const ax=draft.motion.amount*maximum,ay=ax*draft.motion.vertical;
       const scale=Math.max(width*(1+2*ax)/preview.width,height*(1+2*ay)/preview.height)*draft.layout.scale;
       const left=Math.min(-width*ax,Math.max(width-preview.width*scale+width*ax,(width-preview.width*scale)*draft.layout.x));
@@ -152,10 +154,13 @@ export function PreviewCanvas(props:Props) {
       motion.current.x+=(target.x-motion.current.x)*smoothing;
       motion.current.y+=(target.y-motion.current.y)*smoothing;
       if(live){
-        // 实时渲染层按同一取景公式定位；感应模式整幅位移，与导出的整幅视频一致。
+        // 实时渲染层按同一取景公式定位。录制模式整幅位移，与导出的整幅视频一致；
+        // 图层模式把倍数为 1 的位移换算成场景单位交给渲染页逐层移动（画面水平翻转时场景内方向相反）。
         const frame=node.parentElement?.querySelector<HTMLElement>('[data-live-frame]');
+        const dx=motion.current.x*width*draft.motion.amount,dy=motion.current.y*height*draft.motion.amount*draft.motion.vertical;
+        if(live.layered)live.parallax?.((draft.layout.flip?-dx:dx)/scale,dy/scale);
         if(frame){
-          const k=node.clientWidth/width,ox=motion.current.x*width*draft.motion.amount,oy=motion.current.y*height*draft.motion.amount*draft.motion.vertical;
+          const k=node.clientWidth/width,ox=live.layered?0:dx,oy=live.layered?0:dy;
           const transform=`translate(${((left+ox)*k).toFixed(1)}px,${((top+oy)*k).toFixed(1)}px) scaleX(${draft.layout.flip?-1:1})`;
           const box=`${(preview.width*scale*k).toFixed(1)}px ${(preview.height*scale*k).toFixed(1)}px ${transform}`;
           if(frame.dataset.box!==box){frame.dataset.box=box;frame.style.width=(preview.width*scale*k).toFixed(1)+'px';frame.style.height=(preview.height*scale*k).toFixed(1)+'px';frame.style.transform=transform;}
@@ -166,14 +171,19 @@ export function PreviewCanvas(props:Props) {
         const video=videos.current.get(layer.id);
         const image=video&&video.readyState>=2?video:graphics.current.get(frameFile(layer,elapsed.current,draft.layout.flip?-motion.current.x:motion.current.x))||graphics.current.get(layer.asset);
         if(!image)continue;
+        const curve=(layer as CurveLayer).curve;
+        const at=(key:keyof NonNullable<CurveLayer['curve']>,value:number)=>curve?.[key]?weightAt(curve[key],minute):value;
         const offset=layer.travel?.length?sample(layer.travel,elapsed.current):[0,0];
-        const alpha=(layer.fade?.length?sample(layer.fade,elapsed.current)[0]/255:1)*(layer.time?weightAt(layer.time,minute):1);
+        const alpha=(layer.fade?.length?sample(layer.fade,elapsed.current)[0]/255:1)*(layer.time?weightAt(layer.time,minute):1)*at('alpha',1);
         if(alpha<=0)continue;
         ctx.save();ctx.globalAlpha=alpha;
-        ctx.translate(left+(draft.layout.flip?preview.width-layer.x-offset[0]:layer.x+offset[0])*scale+motion.current.x*width*draft.motion.amount*layer.motion,
-          top+(layer.y+offset[1])*scale+motion.current.y*height*draft.motion.amount*layer.motion*draft.motion.vertical);
-        ctx.rotate((draft.layout.flip?-layer.rotation:layer.rotation)*Math.PI/180);
+        const x=layer.x+offset[0]+at('dx',0),y=layer.y+offset[1]+at('dy',0),rotation=layer.rotation+at('rot',0);
+        ctx.translate(left+(draft.layout.flip?preview.width-x:x)*scale+motion.current.x*width*draft.motion.amount*layer.motion,
+          top+y*scale+motion.current.y*height*draft.motion.amount*layer.motion*draft.motion.vertical);
+        ctx.rotate((draft.layout.flip?-rotation:rotation)*Math.PI/180);
         if(draft.layout.flip)ctx.scale(-1,1);
+        // 平移已经定位图片中心，曲线缩放与旋转均绕该中心进行。
+        ctx.scale(at('sx',1),at('sy',1));
         ctx.drawImage(image,-layer.w*scale/2,-layer.h*scale/2,layer.w*scale,layer.h*scale);
         ctx.restore();
       }
@@ -182,7 +192,7 @@ export function PreviewCanvas(props:Props) {
         const values=widgets.values(new Date(),samples);
         for(const row of preview.clock.rows){
           const setting=draft.layout.clock.rows[row.key];if(!setting.visible||row.sourceVisible===false)continue;
-          const parts=rowParts(row,values),unit=Math.min(width/976,height/596)*setting.size/row.size;
+          const parts=rowParts({...row,language:setting.language},values),unit=Math.min(width/976,height/596)*setting.size/row.size;
           let x=setting.x*width;const y=setting.y*height;
           if(setting.align==='left')x+=parts.w*unit/2;if(setting.align==='right')x-=parts.w*unit/2;
           const paint=(file:string|undefined,px:number,w:number)=>{const image=file?glyphs.current.get(file):null;if(image)ctx.drawImage(image,px-w*unit/2,y-row.h*unit/2,w*unit,row.h*unit);};

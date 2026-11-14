@@ -79,13 +79,14 @@ def test_fallback_prefers_regular_weight():
         assert 'Regular' in noto[0].stem
 
 
-@pytest.fixture(scope='module')
-def widgets(tmp_path_factory):
+@pytest.fixture(scope='module',params=['zh','en'])
+def widgets(tmp_path_factory,request):
     stage=tmp_path_factory.mktemp('背屏组件');(stage/'assets').mkdir()
     draft=draft_for('lunar','steps','distance','temperature','weather','range','air','sunrise','sunset','battery','text')
     for key,align in (('steps','left'),('distance','right'),('temperature','center')):
         draft['layout']['clock']['rows'][key]['align']=align
     draft['layout']['clock']['rows']['text']['text']='今天也要开心'
+    for row in draft['layout']['clock']['rows'].values():row['language']=request.param
     config=bridge.config_for(draft,{'width':976,'height':596,'name':'测试机型','safeLeft':.32,
                                   'camera':{'x':152,'ys':[151,451],'r':102},'cornerRadius':84})
     selected={role:(font_data(),{'字体文件':'本机字体'}) for role in clockwork.ROLES}
@@ -96,6 +97,86 @@ def widgets(tmp_path_factory):
     layers=[{'id':1,'asset':'assets/bg.png','x':488,'y':298,'w':976,'h':596,'motion':1,'rotation':0,'image':image}]
     package,report=converter.write_product(stage,976,596,layers,config,'组件检查',[],[],{},'image',clock)
     return stage,config,clock,package,report
+
+
+@pytest.mark.parametrize('language',['zh','en'])
+@pytest.mark.parametrize('label',[True,False])
+def test_all_localized_widgets_have_complete_glyphs_and_manifest(tmp_path,monkeypatch,language,label):
+    definitions=[spec for spec in clockwork.WIDGETS.values() if spec.get('lang')]
+    draft=draft_for(*(spec['key'] for spec in definitions))
+    # 顶层语言故意与星期行相反，确认逐行设置优先。
+    draft['layout']['clock']['language']='zh' if language=='en' else 'en'
+    for row in draft['layout']['clock']['rows'].values():row.update(language=language,label=label)
+    config=bridge.config_for(draft,{'width':976,'height':596,'name':'测试机型'})
+    config['组件示例']={'lm':23,'ld':29}
+    (tmp_path/'assets').mkdir()
+    written,needed={},{}
+    original_text,original_glyph,original_resolve=clockwork.write_text,clockwork.write_glyph,clockwork.resolve_font
+
+    def record_text(stage,file,text,*args):
+        written[file]=text
+        return original_text(stage,file,text,*args)
+
+    def record_glyph(stage,file,text,*args):
+        written[file]=text
+        return original_glyph(stage,file,text,*args)
+
+    def record_font(data,glyphs,size,name,source):
+        needed[name]=set(glyphs)
+        return original_resolve(data,glyphs,size,name,source)
+
+    monkeypatch.setattr(clockwork,'write_text',record_text)
+    monkeypatch.setattr(clockwork,'write_glyph',record_glyph)
+    monkeypatch.setattr(clockwork,'resolve_font',record_font)
+    selected={role:(font_data(),{'字体文件':'本机字体'}) for role in clockwork.ROLES}
+    clock=clockwork.build_clock(tmp_path,config,selected)
+    rows={row['key']:row for row in clock['rows']}
+    expected={'week':'FRIDAY','lunar':'Lunar L12/30','steps':'6542 steps','distance':'4.36 km','calories':'238 kcal',
+              'active':'Active 32 min','goal':'Goal 82%','weather':'Cloudy','humidity':'Humidity 64%',
+              'air':'AQI Good','sunrise':'Sunrise 06:42','sunset':'Sunset 17:08','battery':'Battery 86%','sms':'SMS 2','calls':'Missed 1'}
+    bare={'lunar':'L12/30','steps':'6542','distance':'4.36','calories':'238','active':'32','goal':'82%',
+          'humidity':'64%','air':'Good','sunrise':'06:42','sunset':'17:08','battery':'86%','sms':'2','calls':'1'}
+    if not label:expected.update(bare)
+    values=clockwork.field_values(datetime(2026,11,13,10,8),config['组件示例'])
+    for spec in definitions:
+        row=rows[spec['key']]
+        assert row['language']==language
+        if spec['key']=='week':
+            assert clock['week_names']==list(clockwork.WEEK_EN if language=='en' else clockwork.WEEK_ZH)
+            texts=[written[file] for file in row['weekdays']]
+        else:
+            texts=[written[seg['asset']] for seg in row['segments'] if seg['t']=='s']
+            for seg in row['segments']:
+                if seg['t']=='c':
+                    choices=clockwork.FIELDS[seg['f']]['choices_en' if language=='en' else 'choices']
+                    assert [written[file] for file in seg['assets']]==choices
+                    texts+=choices
+            if row.get('digits'):texts+='0123456789'
+            if row.get('dot'):texts+='.'
+        assert set(''.join(texts))<=needed[spec['name']]
+        if language=='en':
+            assert clockwork.missing_glyphs(clockwork.font_coverage(font_data())[1],''.join(texts))==''
+            _,parts=clockwork.row_parts(row,values)
+            assert ''.join(written[file] for file,_,_ in parts)==expected[spec['key']]
+    image=Image.new('RGBA',(32,20),'#123456');image.save(tmp_path/'assets/bg.png')
+    layers=[{'id':1,'asset':'assets/bg.png','x':488,'y':298,'w':976,'h':596,'motion':1,'rotation':0,'image':image}]
+    package,_=converter.write_product(tmp_path,976,596,layers,config,'组件语言检查',[],[],{},'image',clock)
+    with zipfile.ZipFile(package) as archive:
+        assert set(clock['assets'])<=set(archive.namelist())
+        root=ET.fromstring(archive.read('manifest.xml'))
+    referenced=set()
+    for row in clock['rows']:
+        group=root.find(f"Group[@name='clock_{row['key']}']")
+        assert group is not None
+        for node in group.iter('Image'):
+            src=node.get('src')
+            if node.get('srcid') is None:
+                assert src in clock['assets'];referenced.add(src)
+            else:
+                path=Path(src)
+                files={file for file in clock['assets'] if re.fullmatch(re.escape(str(path.with_suffix('')))+r'_\d+'+re.escape(path.suffix),file)}
+                assert files;referenced.update(files)
+    assert referenced==set(clock['assets'])
 
 
 def test_widget_assets_binders_and_complete_product(widgets):

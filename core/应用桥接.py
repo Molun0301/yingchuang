@@ -163,10 +163,46 @@ def raw_clock_ids(theme):
             and isinstance(converter.value(obj["text"], ""), str) and clockwork.clock_roles(obj, converter.value(obj["text"], ""))]
 
 
+def adjustment_layer(obj, props):
+    image = obj.get("image")
+    if image == "models/util/solidlayer.json":
+        return int(converter.property_value(obj.get("colorBlendMode"), props, 0)) != 0
+    specs = effects_for(obj, props)
+    return image in {"models/util/fullscreenlayer.json", "models/util/projectlayer.json", "models/util/composelayer.json"} and bool(specs) and not any(kind == "clouds" for kind, _ in specs)
+
+
+def daytime_layers(pkg, objects):
+    assets = SceneAssets(pkg, None, converter.decode_tex)
+    def resource(name):
+        return pkg.read(name) if pkg.has(name) else assets.builtin(name)
+    def description(name):
+        data = resource(name)
+        return json.loads(data.decode("utf-8-sig")) if data is not None else {}
+    def shaders(material):
+        return [entry["shader"] for entry in description(material).get("passes", []) if entry.get("shader")]
+    result = []
+    for obj in objects:
+        names = []
+        if isinstance(obj.get("image"), str):
+            model = description(obj["image"])
+            if model.get("material"):names.extend(shaders(model["material"]))
+        for effect in obj.get("effects", []):
+            if not effect.get("file"):continue
+            for entry in description(effect["file"]).get("passes", []):
+                if entry.get("material"):names.extend(shaders(entry["material"]))
+        found = False
+        for name in names:
+            for suffix in (".frag", ".vert"):
+                data = resource("shaders/" + name + suffix)
+                if data is not None and b"g_Daytime" in data:found = True
+        if found:result.append(obj["id"])
+    return result
+
+
 def inspect_theme(request):
     theme = request["theme"]
     if theme["type"] != "scene":
-        return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None, "clockLayerIds": [],
+        return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None, "clockLayerIds": [], "adjustLayerIds": [], "daytimeLayerIds": [],
                 "renderable": theme["type"] in {"image", "video"}, "fontIssue": "",
                 **({} if theme["type"] in {"image", "video"} else {"reason": "原生图层只支持场景、图片和视频，请使用完整画面导出。"})}
     try:
@@ -175,7 +211,7 @@ def inspect_theme(request):
         try: clock_ids = raw_clock_ids(theme)
         except (ValueError, OSError, KeyError): clock_ids = []
         return {"hasClock": False, "fonts": [], "layers": [], "sourceSize": None, "renderable": False, "fontIssue": "",
-                "reason": str(exc), "clockLayerIds": clock_ids}
+                "reason": str(exc), "clockLayerIds": clock_ids, "adjustLayerIds": [], "daytimeLayerIds": []}
     worlds = converter.world_transforms(scene["objects"], props, width, height, [])
     candidates, role_fonts = clockwork.theme_font_sources(scene["objects"], worlds, props)
     font_paths=set(candidates)
@@ -211,6 +247,8 @@ def inspect_theme(request):
                and clockwork.clock_roles(obj,converter.value(obj["text"],""))]
     return {"hasClock": has_clock, "fonts": fonts, "sourceFonts": source_fonts, "sourceColors": source_colors,
             "fontIssue": font_issue, "layers": layers, "sourceSize": [width,height], "renderable": True, "clockLayerIds": clock_ids,
+            "adjustLayerIds":[obj["id"] for obj in scene["objects"] if adjustment_layer(obj,props)],
+            "daytimeLayerIds":daytime_layers(pkg,scene["objects"]),
             "scriptInput":{"scene":original,"properties":original_props,"width":width,"height":height,"clockLayerIds":clock_ids}}
 
 
@@ -218,7 +256,7 @@ def layer_plan(request):
     """
     逐层渲染的规划：所有可见图层逐个单独渲染，保留逐层感应。
     合成、投影、全屏层取下方已绘制的画面再处理：下方只有一个感应幅度相同的图层时（如只处理背景的模糊层），
-    两者渲染成一层（members），画面与电脑一致且不减少图层；下方有多个图层时不合并，隐藏并记录。
+    两者渲染成一层（members）；其余调色层交由查色表测量处理。
     varying 为随时段变化的对象，不参与合成。
     """
     theme = request["theme"]
@@ -227,7 +265,7 @@ def layer_plan(request):
     assets = SceneAssets(pkg,None,converter.decode_tex)
     clock_ids = set(raw_clock_ids(theme))
     varying = set(request.get("varying",[]))
-    targets,hidden,unsupported = [],[],[]
+    targets,hidden,unsupported,adjust,drawn = [],[],[],[],[]
     # 下方有背屏另行播放的视频时，渲染器取不到它的画面，不能合成。
     captured = True
     for obj in scene["objects"]:
@@ -244,20 +282,26 @@ def layer_plan(request):
                     motion = min(2.,max(.2,1+state["depth"]*.45))
                     if effects and captured and len(targets)==1 and targets[0]["kind"]!="particle" and targets[0]["motion"]==motion and targets[0]["id"] not in varying:
                         below = targets.pop()
+                        drawn.remove(below["id"]);drawn.append(obj["id"])
                         targets.append({"id":obj["id"],"name":below["name"],"kind":"image","reason":"合成层","motion":motion,"members":[below["id"],*below.get("members",[])]})
                         continue
+                    if adjustment_layer(obj,props):
+                        adjust.append((obj["id"],"compose"));continue
                     if effects:unsupported.append({"id":obj["id"],"name":name,"reason":"全屏后期效果 "+"、".join(effects)+" 无法逐层还原"})
                     hidden.append(obj["id"]);continue
                 kind = "image"
             else:
+                if adjustment_layer(obj,props):
+                    adjust.append((obj["id"],"blend"));continue
                 if image.startswith("models/util/") and any("audio_bars" in effect.get("file","").lower() for effect in obj.get("effects",[])):
                     continue
                 if image!="models/util/solidlayer.json":
                     model = assets.json(image)
                     passes = assets.json(model["material"])["passes"]
-                    # 视频图层由背屏视频元素播放。
-                    if passes and passes[0].get("textures") and assets.is_video(passes[0]["textures"][0]):
-                        captured = False;continue
+                    # 视频图层由背屏视频元素播放；背屏视频没有透明通道，带抠色、透明度效果的视频改为逐层渲染。
+                    if passes and passes[0].get("textures") and assets.is_video(passes[0]["textures"][0]) \
+                            and not any(kind in {"colorkey","opacity"} for kind,_ in specs):
+                        captured = False;drawn.append(obj["id"]);continue
                 kind = "image"
         elif isinstance(obj.get("particle"),str) and obj["particle"]:
             descriptor = assets.json(obj["particle"])
@@ -271,7 +315,10 @@ def layer_plan(request):
             continue
         # 与录制模式使用同一渲染器，默认画面一致；转换核心自己的近似渲染只在渲染器不可用时使用。
         targets.append({"id":obj["id"],"name":name,"kind":kind,"reason":"完整渲染","motion":min(2.,max(.2,1+state["depth"]*.45))})
-    return {"targets":targets,"hidden":hidden,"unsupported":unsupported}
+        drawn.append(obj["id"])
+    order={obj["id"]:index for index,obj in enumerate(scene["objects"])}
+    return {"targets":targets,"hidden":hidden,"unsupported":unsupported,
+            "adjust":[{"id":identifier,"kind":kind,"below":[target for target in drawn if order[target]<order[identifier]]} for identifier,kind in adjust]}
 
 
 def config_for(draft, device):
@@ -299,7 +346,7 @@ def baked_version(record):
     return [record["dir"],record["count"],record["width"],record["height"],record["fps"],record["bbox"],item.st_size,item.st_mtime_ns]
 
 
-def graphic_key(theme, draft, baked=None, time_variants=None):
+def graphic_key(theme, draft, baked=None, time_variants=None, adjust=None):
     source = Path(theme["source"])
     stat = source.stat()
     file_versions={}
@@ -315,11 +362,14 @@ def graphic_key(theme, draft, baked=None, time_variants=None):
     if time_variants:
         variants={"scenes":[digest(scene) for scene in time_variants["scenes"]],
                   "objects":{identifier:[{**variant,"baked":baked_version(variant["baked"]) if variant.get("baked") else None}
-                                         for variant in records] for identifier,records in time_variants["objects"].items()}}
+                                         for variant in records] for identifier,records in time_variants.get("objects",{}).items()},
+                  "curves":{identifier:{**curve,"baked":baked_version(curve["baked"]) if curve.get("baked") else None}
+                            for identifier,curve in time_variants.get("curves",{}).items()}}
     identity={"version": CACHE_VERSION, "path": str(source), "mtime": stat.st_mtime_ns, "size": stat.st_size,"files":file_versions,"baked":baked_versions,
                    "timeVariants":variants,
                    "properties": draft.get("properties",{}), "layers": draft.get("layers",{}),
                    "clock": draft["layout"]["clock"]["enabled"], "engineRoots": theme.get("engineRoots",[]),"script":theme.get("scriptSignature")}
+    if adjust:identity["adjust"]=adjust
     if theme["type"] in {"video","scene"}:
         identity["fps"]=draft["motion"]["fps"]
     if theme["type"]=="video":
@@ -335,17 +385,34 @@ def time_variant_scene(scene, worlds, properties, sw, sh, variants, baked, notes
     by_id=[{obj["id"]:obj for obj in item["objects"]} for item in scenes]
     transforms=[converter.world_transforms(item["objects"],properties,sw,sh,notes) for item in scenes]
     objects=[];worlds=dict(worlds)
-    baked={identifier:record for identifier,record in baked.items() if identifier not in variants["objects"]}
+    records=variants.get("objects",{})
+    curves=variants.get("curves",{})
+    baked={identifier:record for identifier,record in baked.items() if identifier not in records and identifier not in curves}
     for obj in scene["objects"]:
         identifier=str(obj["id"])
-        if identifier not in variants["objects"]:
+        if identifier in curves:
+            curve=curves[identifier]
+            state=transforms[curve["scene"]][obj["id"]]
+            if state is None or state["alpha"]<=0:continue
+            current=deepcopy(by_id[curve["scene"]][obj["id"]])
+            parent=transforms[curve["scene"]].get(current.get("parent"))
+            reference={field:converter.vector(converter.property_value(current.get(field),properties),default)
+                       for field,default in (("origin",[0,0,0] if parent else [sw/2,sh/2,0]),("scale",[1,1,1]),("angles",[0,0,0]))}
+            current["_curve"]={key:deepcopy(curve[key]) for key in ("alpha","origin","scale","angles") if key in curve}
+            current["_curve"]["reference"]={**reference,"matrix":state["matrix"],"parent":parent["matrix"] if parent else (1,0,0,1,0,0),"height":sh}
+            current["_adjust"]=curve.get("adjust",[])
+            objects.append(current);worlds[obj["id"]]=state
+            if curve.get("baked"):baked[identifier]=curve["baked"]
+            continue
+        if identifier not in records:
             objects.append(obj)
             continue
-        for index,variant in enumerate(variants["objects"][identifier]):
+        for index,variant in enumerate(records[identifier]):
             state=transforms[variant["scene"]][obj["id"]]
             if state is None or state["alpha"]<=0:continue
             current=deepcopy(by_id[variant["scene"]][obj["id"]])
             current.update(id=f"{identifier}_t{index}",_time=deepcopy(variant["alpha"]),_time_index=index)
+            current["_adjust"]=variant.get("adjust",[])
             objects.append(current);worlds[current["id"]]=state
             if variant.get("baked"):baked[current["id"]]=variant["baked"]
     return {**scene,"objects":objects},worlds,baked
@@ -355,7 +422,8 @@ def prepare_graphics(request, fast=False):
     theme, draft = request["theme"], request["draft"]
     baked=request.get("baked",{})
     time_variants=None if fast else request.get("timeVariants")
-    key=graphic_key(theme,draft,baked,time_variants)
+    adjust=request.get("adjust")
+    key=graphic_key(theme,draft,baked,time_variants,adjust)
     root = Path(request["cacheRoot"])/"scenes"/key
     if fast and not (root/"场景.json").is_file():root=Path(request["cacheRoot"])/"previews"/key
     saved = root/"场景.json"
@@ -375,6 +443,19 @@ def prepare_graphics(request, fast=False):
             worlds = converter.world_transforms(scene["objects"],props,sw,sh,notes)
             if time_variants:
                 scene,worlds,baked=time_variant_scene(scene,worlds,props,sw,sh,time_variants,baked,notes)
+            if adjust:
+                hidden={str(identifier) for identifier in adjust.get("hidden",[])}
+                applied={key.rsplit("@",1)[0] for key in adjust.get("luts",{})}
+                for obj in scene["objects"]:
+                    keys=adjust.get("layers",{}).get(str(obj["id"]),obj.get("_adjust",[]))
+                    obj["_luts"]=[adjust["luts"][key] for key in keys]
+                    original_id=str(obj["id"]).split("_t",1)[0]
+                    if original_id in hidden:
+                        worlds[obj["id"]]=None
+                        notes.append(f"{obj.get('name',original_id)} · 位置相关调色层已隐藏。")
+                    elif adjust.get("luts") and adjustment_layer(obj,props) and original_id in applied:
+                        worlds[obj["id"]]=None
+                        notes.append(f"{obj.get('name',original_id)} · 调色已通过查色表套用。")
             for obj in scene["objects"]:
                 if "text" not in obj:continue
                 raw = converter.value(obj.get("text"), "")
@@ -392,9 +473,11 @@ def prepare_graphics(request, fast=False):
             else:layers,name=[],project.get("title",Path(theme["source"]).parent.name)
             event("读取图层" if fast else "生成场景动效", 22)
             layers,restored,details = build_motion_scene(pkg,scene,props,layers,worlds,stage,converter.decode_tex,converter.layer_geometry,notes,fast=fast,fps=draft["motion"]["fps"],baked=baked)
-            timed_objects=time_variants["objects"] if time_variants else {}
+            timed_objects=time_variants.get("objects",{}) if time_variants else {}
             details["时段变化"]={"对象数":len(timed_objects),"变体数":sum(len(records) for records in timed_objects.values())}
-            if any(timed_objects.values()):restored.append("随时段变化")
+            if time_variants and time_variants.get("curves"):
+                details["时段变化"]["曲线数"]=len(time_variants["curves"])
+            if any(timed_objects.values()) or time_variants and time_variants.get("curves"):restored.append("随时段变化")
             script_result=theme.get("scriptResult",{})
             if script_result.get("evaluated"):
                 restored.append("脚本属性初始状态")
@@ -420,7 +503,7 @@ def prepare_graphics(request, fast=False):
             details={"原视频尺寸":original.get("source_size"),"输出视频尺寸":[sw,sh],"时长":info.get("duration"),"帧率":info.get("fps")}
         else:
             raise ValueError("此类主题的背屏转换尚未接入。")
-        clean = [{k:v for k,v in layer.items() if k not in {"image","native_size","atlas","puppet"}} for layer in layers]
+        clean = [{k:v for k,v in layer.items() if k not in {"image","native_size","atlas","puppet","_luts"}} for layer in layers]
         if not clean: raise ValueError("主题中没有可输出的画面图层。")
         payload = {"width":sw,"height":sh,"title":theme["title"],"layers":clean,"restored":restored,"notes":list(dict.fromkeys(notes)),"details":details,"progressive":fast and theme["type"]!="image","background":background}
         atomic_json(stage/"场景.json",payload)
@@ -562,6 +645,7 @@ def export(request):
             with Image.open(stage/layer["asset"]) as im:layer["image"] = im.convert("RGBA")
         package,report = converter.write_product(stage,payload["width"],payload["height"],layers,payload["config"],
             request["theme"]["title"],payload["restored"],payload["notes"],payload["details"],request["theme"]["type"],payload["clock"],payload.get("background","#061633"))
+        report["未迁移及注意事项"]=list(dict.fromkeys([*report["未迁移及注意事项"],*request.get("notes",[])]))
         report.update({"目标":device,"输出尺寸":[request["device"]["width"],request["device"]["height"]],
                        "主题设置":request["draft"].get("properties",{}),"排版":request["draft"]["layout"]})
         report["效果详情"]["导出压缩"]={**compression,"画质":payload["config"]["导出画质"]}
@@ -577,6 +661,8 @@ def mirror_layers(stage,layers,width):
     files, sequences, videos = set(), set(), set()
     for layer in layers:
         layer["x"]=width-layer["x"];layer["rotation"]=-layer["rotation"]
+        for field in ("dx","rot"):
+            if field in layer.get("curve",{}):layer["curve"][field]=[[minute,-value] for minute,value in layer["curve"][field]]
         if "travel" in layer:layer["travel"]=[[t,-x,y] for t,x,y in layer["travel"]]
         sequence=layer.get("sequence",{})
         files.update([layer["asset"],*sequence.get("frames",[])])

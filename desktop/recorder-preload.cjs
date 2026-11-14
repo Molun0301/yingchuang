@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('recorder', {
   ready: () => ipcRenderer.invoke('recorder-ready'),
   fail: message => ipcRenderer.invoke('recorder-fail', String(message)),
   layer: meta => ipcRenderer.invoke('recorder-layer', meta),
-  done: () => ipcRenderer.invoke('recorder-done'),
+  next: snapshot => ipcRenderer.invoke('recorder-next', snapshot),
+  done: result => ipcRenderer.invoke('recorder-done', result),
 });

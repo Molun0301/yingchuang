@@ -312,7 +312,7 @@ def read_scene(source):
 
 
 def world_transforms(objects, props, sw, sh, notes):
-    """按父子关系合成平面变换和透明度。"""
+    """按父子关系合成平面变换和颜色，保留图层自身透明度。"""
     by_id = {o["id"]: o for o in objects}
     if len(by_id) != len(objects):
         raise ConversionError("场景图层编号重复。")
@@ -358,7 +358,6 @@ def world_transforms(objects, props, sw, sh, notes):
             pa, pb, pc, pd, px, py = parent["matrix"]
             a, b, c, d = pa*a + pb*c, pa*b + pb*d, pc*a + pd*c, pc*b + pd*d
             x, y = pa*x + pb*y + px, pc*x + pd*y + py
-            alpha *= parent["alpha"]
             color = [left * right for left, right in zip(color, parent["color"])]
         result = {"matrix": (a,b,c,d,x,y), "alpha": alpha, "color": color, "depth": depth}
         cache[obj_id] = result
@@ -507,7 +506,7 @@ def time_weight(points, minute):
     return points[-1][1]
 
 
-def time_weight_expression(points):
+def time_curve_expression(points):
     # 用斜率增量表达折线，避免为每段重复嵌套条件判断。
     # 硬切换仅相隔 0.01 分钟，保留斜率精度才能对齐视频的 0.5 边界。
     def precise(value):return f"{value:.17f}".rstrip("0").rstrip(".") or "0"
@@ -519,7 +518,11 @@ def time_weight_expression(points):
         if change:
             expression+=("+" if change>0 else "-")+f"{precise(abs(change))}*max(0,(#hour24*60+#minute)-{precise(start)})"
         previous=slope
-    return f"max(0,min(1,{expression}))"
+    return expression
+
+
+def time_weight_expression(points):
+    return f"max(0,min(1,{time_curve_expression(points)}))"
 
 
 def element(parent, tag, **attrs):
@@ -741,14 +744,28 @@ def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
     for layer in layers:
         motion = number(layer["motion"])
         weight=time_weight_expression(layer["time"]) if "time" in layer else None
+        curve={key:time_curve_expression(points) for key,points in layer.get("curve",{}).items()}
+        alpha=weight
+        if "alpha" in curve:alpha=f"({weight})*({curve['alpha']})" if weight is not None else curve["alpha"]
+        x=number(layer["x"])+(f"+({curve['dx']})" if "dx" in curve else "")
+        y=number(layer["y"])+(f"+({curve['dy']})" if "dy" in curve else "")
+        w=number(layer["w"])+(f"*({curve['sx']})" if "sx" in curve else "")
+        h=number(layer["h"])+(f"*({curve['sy']})" if "sy" in curve else "")
+        rotation=number(layer["rotation"])+(f"+({curve['rot']})" if "rot" in curve else "")
+        position_x=f"#scene_left+({x})*#scene_scale+#move_x*#view_width*{amp}*{motion}" if curve else f"#scene_left+{x}*#scene_scale+#move_x*#view_width*{amp}*{motion}"
+        position_y=f"#scene_top+({y})*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}" if curve else f"#scene_top+{y}*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}"
         if layer.get("video"):
             target="video_"+str(layer["id"])
             video=element(root,"Video",name=target,layerType="bottom",
-                    x=f"#scene_left+{number(layer['x']-layer['w']/2)}*#scene_scale+#move_x*#view_width*{amp}*{motion}",
-                    y=f"#scene_top+{number(layer['y']-layer['h']/2)}*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}",
-                    w=f"{number(layer['w'])}*#scene_scale",h=f"{number(layer['h'])}*#scene_scale")
-            if weight is not None:
-                visibility=f"gt({weight},0.5)"
+                    x=position_x+f"-({w})*#scene_scale/2" if curve else f"#scene_left+{number(layer['x']-layer['w']/2)}*#scene_scale+#move_x*#view_width*{amp}*{motion}",
+                    y=position_y+f"-({h})*#scene_scale/2" if curve else f"#scene_top+{number(layer['y']-layer['h']/2)}*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}",
+                    w=f"{w}*#scene_scale",h=f"{h}*#scene_scale")
+            if curve:
+                video.set("rotation",rotation)
+                video.set("pivotX",f"({w})*#scene_scale/2");video.set("pivotY",f"({h})*#scene_scale/2")
+            # 视频按时段权重显示或隐藏，不随透明度渐变；隐藏时暂停，避免多段视频同时解码。
+            if alpha is not None:
+                visibility=f"gt({alpha},0.5)"
                 video.set("visibility",visibility);video_visibility[target]=visibility
                 # 只在跨过可见阈值时触发，渐变过程中不反复重启视频。
                 variable=target+"_visible"
@@ -756,13 +773,13 @@ def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
                 element(trigger,"VideoCommand",target=target,command="play",condition="#"+variable)
                 element(trigger,"VideoCommand",target=target,command="pause",condition=f"eq(#{variable},0)")
             continue
-        parent=element(root,"Group",name="time_"+str(layer["id"]),alpha=f"255*({weight})") if weight is not None else root
+        parent=element(root,"Group",name="time_"+str(layer["id"]),alpha=f"255*({alpha})") if alpha is not None else root
         image = element(parent, "Image", name="layer_" + str(layer["id"]), src=layer["asset"],
-                x=f"#scene_left+{number(layer['x'])}*#scene_scale+#move_x*#view_width*{amp}*{motion}",
-                y=f"#scene_top+{number(layer['y'])}*#scene_scale+#move_y*#view_height*{amp}*{motion}*{number(c['纵向感应比例'])}",
-                w=f"{number(layer['w'])}*#scene_scale", h=f"{number(layer['h'])}*#scene_scale",
-                align="center", alignV="center", rotation=number(layer["rotation"]),
-                pivotX=f"{number(layer['w']/2)}*#scene_scale", pivotY=f"{number(layer['h']/2)}*#scene_scale")
+                x=position_x, y=position_y,
+                w=f"{w}*#scene_scale", h=f"{h}*#scene_scale",
+                align="center", alignV="center", rotation=rotation,
+                pivotX=f"({w})*#scene_scale/2" if curve else f"{number(layer['w']/2)}*#scene_scale",
+                pivotY=f"({h})*#scene_scale/2" if curve else f"{number(layer['h']/2)}*#scene_scale")
         add_layer_animation(image, layer)
     if clock is not None:
         add_clock(root, clock, c)
@@ -817,12 +834,17 @@ def still_preview(sw, sh, layers, c, clock=None, stage=None, background="#061633
         if "image" not in layer:
             continue
         im=layer["image"]
-        if "time" in layer:
-            weight=time_weight(layer["time"],minute)
+        from 时段曲线 import sample
+        curve={key:float(sample(points,minute)) for key,points in layer.get("curve",{}).items()}
+        if "time" in layer or "alpha" in curve:
+            weight=(time_weight(layer["time"],minute) if "time" in layer else 1)*curve.get("alpha",1)
             if weight<=1e-6:continue
             im=im.copy()
             im.putalpha(im.getchannel("A").point(lambda alpha:round(alpha*weight)))
-        angle=math.radians(layer["rotation"])
+        unit=box["w"]/layer["w"]
+        box={"x":box["x"]+curve.get("dx",0)*unit,"y":box["y"]+curve.get("dy",0)*unit,
+             "w":box["w"]*curve.get("sx",1),"h":box["h"]*curve.get("sy",1)}
+        angle=math.radians(layer["rotation"]+curve.get("rot",0))
         co,si=math.cos(angle),math.sin(angle)
         sx,sy=im.width/box["w"],im.height/box["h"]
         x,y=box["x"],box["y"]

@@ -91,6 +91,24 @@ function normalizeProperties(project) {
   }).sort((a,b) => (a.order ?? a.index ?? 999) - (b.order ?? b.index ?? 999));
 }
 
+/** WE 按用户、壁纸路径存设置；同一创意工坊壁纸换过库目录后仍沿用这些值。 */
+function wallpaperValues(configs, folder, properties) {
+  const normalize = value => value.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase();
+  const themePath = normalize(folder), workshop = themePath.match(/\/431960\/(\d+)(?:\/|$)/)?.[1];
+  const values = Object.fromEntries(properties.filter(p => 'value' in p).map(p => [p.key, p.value]));
+  const keys = new Set(properties.map(p => p.key));
+  for (const config of configs) for (const user of Object.values(config)) {
+    for (const [location, saved] of Object.entries(user.wproperties || {})) {
+      const normalized = normalize(location);
+      if (normalized !== themePath && !(workshop && (normalized + '/').includes(`/431960/${workshop}/`))) continue;
+      const table = Object.keys(saved).some(key => /^Monitor/i.test(key)) ? saved.Monitor0 ?? Object.values(saved)[0] : saved;
+      for (const [key, value] of Object.entries(table)) if (keys.has(key))
+        values[key] = value && typeof value === 'object' && 'value' in value ? value.value : value;
+    }
+  }
+  return values;
+}
+
 async function discover(extraRoots = []) {
   const candidates = [...steamCandidates(), ...await windowsSteamRoots(), ...extraRoots];
   const librarySet = new Set(), scanned = new Set(), folders = new Set(), engines = new Set();
@@ -108,10 +126,12 @@ async function discover(extraRoots = []) {
     }
     librarySet.add(real);
   }
-  const roots = [];
+  const roots = [], configs = [];
   for (const library of librarySet) {
     const steamapps = path.basename(library).toLowerCase() === 'steamapps' ? library : path.join(library, 'steamapps');
     const engine = path.join(steamapps, 'common/wallpaper_engine');
+    const config = await readJson(path.join(engine, 'config.json'));
+    if (config) configs.push(config);
     if (await exists(path.join(engine, 'assets'))) engines.add(path.join(engine, 'assets'));
     const searches = [path.join(steamapps, 'workshop/content/431960'),
       path.join(engine, 'projects/myprojects'), path.join(engine, 'projects/defaultprojects')];
@@ -152,7 +172,7 @@ async function discover(extraRoots = []) {
     themes.push({ id: createHash('sha256').update(real).digest('hex').slice(0, 20),
       workshopId: /^\d+$/.test(path.basename(real)) ? path.basename(real) : '',
       title: plainText(project.title) || path.basename(real), folder: real, source, type: sourceType,
-      preview, properties: props, propertyValues: Object.fromEntries(props.filter(p => 'value' in p).map(p => [p.key,p.value])),
+      preview, properties: props, propertyValues: wallpaperValues(configs, real, props),
       modified: stat.mtimeMs, author: plainText(project.author), engineRoots: [...engines], project });
   }
   themes.sort((a,b) => b.modified - a.modified || a.title.localeCompare(b.title, 'zh-CN'));

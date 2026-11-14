@@ -5,6 +5,31 @@ const fs = require('node:fs/promises');
 const { createWriteStream } = require('node:fs');
 const { createGzip, constants: zlib } = require('node:zlib');
 const path = require('node:path');
+const os = require('node:os');
+
+// 所有导出共用的隐藏渲染窗口名额：多项导出并行时，同时存在的窗口总数不超过它，显存占用不随导出数成倍增加。
+const WINDOW_SLOTS = Math.min(8, Math.max(2, Math.floor(os.cpus().length / 4)));
+let freeWindows = WINDOW_SLOTS;
+const windowQueue = [];
+function acquireWindow(signal) {
+  if (signal?.aborted) return Promise.reject(new Error('已取消'));
+  if (freeWindows > 0) { freeWindows--; return Promise.resolve(); }
+  return new Promise((resolve, reject) => {
+    const abort = () => { windowQueue.splice(windowQueue.indexOf(entry), 1); reject(new Error('已取消')); };
+    const entry = () => { signal?.removeEventListener('abort', abort); resolve(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    windowQueue.push(entry);
+  });
+}
+function releaseWindow() {
+  const next = windowQueue.shift();
+  if (next) next(); else freeWindows++;
+}
+/** 先领名额再开窗口，窗口结束（成功、失败或取消）后归还。 */
+async function withWindow(signal, open) {
+  await acquireWindow(signal);
+  try { return await open(); } finally { releaseWindow(); }
+}
 
 // 正在进行的录制或烘焙窗口，按窗口区分；逐层烘焙会同时开多个窗口。
 const active = new Map();
@@ -20,7 +45,8 @@ function installRecorderHandlers() {
   ipcMain.handle('recorder-ready', event => current(event).ready());
   ipcMain.handle('recorder-fail', (event, message) => current(event).fail(new Error(String(message))));
   ipcMain.handle('recorder-layer', (event, meta) => current(event).layer(meta));
-  ipcMain.handle('recorder-done', event => current(event).done());
+  ipcMain.handle('recorder-next', (event, snapshot) => current(event).next(snapshot));
+  ipcMain.handle('recorder-done', (event, result) => current(event).done(result));
 }
 
 let encoderChoice;
@@ -86,7 +112,8 @@ class LoopWriter {
   }
 }
 
-async function record({ job, output, ffmpeg, rendererUrl, signal, onProgress }) {
+function record(options) { return withWindow(options.signal, () => recordWindow(options)); }
+async function recordWindow({ job, output, ffmpeg, rendererUrl, signal, onProgress }) {
   if (signal?.aborted) throw new Error('已取消');
   const { width, height } = job.crop;
   const fade = Math.min(job.fade, Math.floor((job.frames - job.fade) / 2));
@@ -159,10 +186,11 @@ function recorderWindow(job) {
 }
 
 /**
- * 逐层烘焙：渲染页依次送来每个目标图层的裁切帧，首尾交叉衔接后写成 <root>/<id>/frames.rgba。
+ * 逐层烘焙：周期层直接写帧，未检出周期的图层沿用首尾交叉淡化，写成压缩帧序列。
  * 返回 Python 需要的 baked 描述；没有画面的图层不写入，交给原生管线处理。
  */
-async function bakeWindow({ job, dirs, rendererUrl, signal, onProgress }) {
+function bakeWindow(options) { return withWindow(options.signal, () => openBakeWindow(options)); }
+async function openBakeWindow({ job, dirs, rendererUrl, signal, onProgress }) {
   if (signal?.aborted) throw new Error('已取消');
   const window = recorderWindow(job), baked = {}, id = window.webContents.id;
   let current = null, finished = 0;
@@ -172,7 +200,7 @@ async function bakeWindow({ job, dirs, rendererUrl, signal, onProgress }) {
     current = null;
     const file = stream._readableState.pipes[0];
     await new Promise((resolve, reject) => { file.once('finish', resolve).once('error', reject); stream.end(); });
-    baked[meta.id] = { dir: dirs[meta.id], width: meta.width, height: meta.height, count: meta.still ? 1 : meta.count - job.fade, fps: job.fps, bbox: meta.bbox };
+    baked[meta.id] = { dir: dirs[meta.id], width: meta.width, height: meta.height, count: meta.count - meta.fade, fps: meta.fps, bbox: meta.bbox, period: meta.period };
   };
   return new Promise((resolve, reject) => {
     let settled = false, watchdog;
@@ -201,8 +229,8 @@ async function bakeWindow({ job, dirs, rendererUrl, signal, onProgress }) {
         const stream = createGzip({ level: 1, strategy: zlib.Z_RLE });
         stream.pipe(createWriteStream(path.join(dirs[meta.id], 'frames.rgba.gz')));
         const writer = { write: data => new Promise(done => { if (stream.write(data)) done(); else stream.once('drain', done); }) };
-        // 静止图层只有一帧，直接写入，不做首尾衔接。
-        current = { stream, meta, loop: meta.still ? { push: data => writer.write(data) } : new LoopWriter(writer, meta.count - job.fade, job.fade) };
+        // 每层独立决定淡化；周期层与静止层原样写入，保留它们自己的帧数和帧率。
+        current = { stream, meta, loop: new LoopWriter(writer, meta.count - meta.fade, meta.fade) };
       },
       frame: data => { alive(); return current?.loop.push(Buffer.from(data.buffer, data.byteOffset, data.byteLength)); },
       done: async () => { await close(); onProgress(1); await finish(); },
@@ -244,4 +272,61 @@ async function bake({ tasks, rendererUrl, signal, onProgress, windows = 2 }) {
   } finally { signal?.removeEventListener('abort', stop); }
 }
 
-module.exports = { installRecorderHandlers, record, bake, LoopWriter };
+/** 观察与查色表共用隐藏窗口的任务生命周期，结果由渲染页在结束时送回。 */
+function measurementWindow(options) { return withWindow(options.signal, () => openMeasurementWindow(options)); }
+async function openMeasurementWindow({ job, rendererUrl, signal, next }) {
+  if (signal?.aborted) throw new Error('已取消');
+  const window = recorderWindow(job), id = window.webContents.id;
+  return new Promise((resolve, reject) => {
+    let settled = false, watchdog;
+    const alive = () => { if (settled) return; clearTimeout(watchdog); watchdog = setTimeout(() => finish(new Error('测量超时：壁纸长时间没有返回结果')), 90000); };
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true; active.delete(id);
+      clearTimeout(watchdog); signal?.removeEventListener('abort', abort);
+      if (!window.isDestroyed()) window.destroy();
+      if (error) reject(error); else resolve(result);
+    };
+    const abort = () => finish(new Error('已取消'));
+    signal?.addEventListener('abort', abort, { once: true });
+    alive();
+    active.set(id, {
+      window, job,
+      next: async snapshot => {
+        alive();
+        try { const request = await next(snapshot); alive(); return request; }
+        catch (error) { finish(error); throw error; }
+      },
+      ready: alive,
+      done: result => finish(null, result),
+      fail: error => finish(error),
+    });
+    window.webContents.on('render-process-gone', (_event, details) => finish(new Error('渲染进程退出：' + details.reason)));
+    window.loadURL(rendererUrl + '?mode=record').catch(finish);
+  });
+}
+
+async function observe({ job, rendererUrl, signal, next }) {
+  await measurementWindow({ job, rendererUrl, signal, next });
+}
+
+/** 每个调色状态一个窗口共用色块测多个目标，结果按任务键、图层编号索引。最多四个窗口同时测量。 */
+async function measureLuts({ tasks, rendererUrl, signal }) {
+  if (signal?.aborted) throw new Error('已取消');
+  const results = {}, controller = new AbortController();
+  const stop = () => controller.abort();
+  signal?.addEventListener('abort', stop, { once: true });
+  let next = 0;
+  const run = async () => {
+    while (next < tasks.length) {
+      const { key, job } = tasks[next++];
+      results[key] = await measurementWindow({ job, rendererUrl, signal: controller.signal });
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, () => run().catch(error => { stop(); throw error; })));
+    return results;
+  } finally { signal?.removeEventListener('abort', stop); }
+}
+
+module.exports = { installRecorderHandlers, record, bake, observe, measureLuts, LoopWriter };
