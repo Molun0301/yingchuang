@@ -8,7 +8,8 @@ const {frameScene}=require('../desktop/framing.cjs');
 
 // 直接运行主进程的生产函数，用合成 worker/录制接口检查跨进程数据，不启动 Electron。
 function mainFunctions(context){
-  const source=fs.readFileSync(path.join(__dirname,'../desktop/pipeline.cjs'),'utf8');
+  // Windows 检出的源码是 CRLF 换行，下面的截取标记按 LF 写
+  const source=fs.readFileSync(path.join(__dirname,'../desktop/pipeline.cjs'),'utf8').replace(/\r\n/g,'\n');
   const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
   const code=section('const BAKE=', '/**\n   * 逐层烘焙')+section('function withBaked(', '/** 观察与查色表')+
     section('async function bakeLayers(', '/**\n   * 按图层缓存')+

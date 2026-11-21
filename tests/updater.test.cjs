@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const vm = require('node:vm');
 const { createHash } = require('node:crypto');
 
@@ -13,7 +14,7 @@ const pendingNotes = { version: '0.3.0', notes: '下载时保存的公告', url:
 
 // 直接调用主进程注册的处理函数，保留真实公告判断、缓存写入和下载流程。
 function createUpdater({ current = '0.3.0', outputDirectory = '/已有导出目录', update = { seenVersion: '0.2.0' },
-  fetch = async () => Response.json(release), directory = '/tmp/映窗公告测试' } = {}) {
+  fetch = async () => Response.json(release), directory = path.join(os.tmpdir(), '映窗公告测试') } = {}) {
   const handlers = {}, requests = [], opened = [], module = { exports: {} };
   const store = { data: { settings: { outputDirectory, update } }, update(callback) { callback(this.data); } };
   const electron = { app: { getVersion: () => current, getPath: () => directory, once() {} },
@@ -97,7 +98,7 @@ test('GitHub 与同版本缓存都没有发布说明时不弹公告', async () =
 });
 
 test('下载成功后保存该版本公告，重启断网时可以显示', async t => {
-  const directory = await fs.mkdtemp('/tmp/yingchuang-update-');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yingchuang-update-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const body = Buffer.from('映窗更新文件');
   const name = process.platform === 'win32' ? '映窗-Windows-x64.zip' : `映窗-Linux-${process.arch === 'arm64' ? 'arm64' : 'x86_64'}.AppImage`;
