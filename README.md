@@ -70,9 +70,9 @@
 
 1. 打开映窗，自动读取 Steam 中的 Wallpaper Engine 壁纸，也可以手动添加目录。
 2. 在设置里选好机型，点开壁纸调整画面、组件和壁纸设置，改动自动保存。
-3. 点击“转换壁纸”，得到 `.mrc` 背屏主题包，按 [背屏导入指南](docs/公开文档/背屏导入指南.md) 放到手机上。未 root、Shizuku 授权和已 root 三种方式都有说明。
+3. 点击“转换壁纸”得到 `.mrc` 背屏主题包，按 [使用说明](docs/公开文档/背屏导入指南.md) 替换到手机上，未 root 和已 root 都能用。
 
-支持机型：小米 17 Pro、17 Pro Max、18 Pro、18 Pro Max。
+支持机型：小米 17 Pro、17 Pro Max、18 Pro、18 Pro Max（澎湃 OS 4）。
 
 ### 两种导出方式
 
@@ -100,13 +100,7 @@ AppImage 需要 FUSE 2。Ubuntu 24.04 及以上运行 `sudo apt install libfuse2
 <details>
 <summary>没有 root 能用吗？</summary>
 
-可以。未 root 时借用妙享背屏“AI 生图”建立的模板，把导出的 `.mrc` 改名替换进去；进不去 `Android/data` 时用 Shizuku 授权的文件管理器。详细步骤和风险见 [背屏导入指南](docs/公开文档/背屏导入指南.md)。
-</details>
-
-<details>
-<summary>手机上的效果实测过吗？</summary>
-
-桌面端的转换、预览和打包已经过测试，手机导入、背屏运行和时段切换还没有在全部机型上实测。遇到问题欢迎提交 [Issue](https://github.com/Molun0301/yingchuang/issues)。
+可以。用 Shizuku 授权的文件管理器，把导出的 `.mrc` 替换进妙享背屏“AI 生图”的模板，步骤见 [使用说明](docs/公开文档/背屏导入指南.md)。
 </details>
 
 <details>
