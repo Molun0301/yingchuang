@@ -3,7 +3,8 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const ts=require('typescript');
-const source=fs.readFileSync(require('node:path').join(__dirname,'../src/live/renderer.ts'),'utf8');
+// Windows 检出的源码是 CRLF 换行，下面的截取标记按 LF 写
+const source=fs.readFileSync(require('node:path').join(__dirname,'../src/live/renderer.ts'),'utf8').replace(/\r\n/g,'\n');
 const begin=source.indexOf('function changedPixels('),end=source.indexOf('/**\n * 逐层烘焙：同一场景实例',begin);
 const code=ts.transpileModule(source.slice(begin,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 const {bakeSignature,detectBakePeriod,bakeCandidates}=vm.runInNewContext(code+'\n({bakeSignature,detectBakePeriod,bakeCandidates})',{Float32Array,Uint8Array,Math});
