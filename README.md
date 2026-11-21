@@ -26,12 +26,14 @@
 | --- | --- |
 | 🎬 **完整特效** | 编辑器用 WebGL（网页图形接口）实时渲染壁纸的特效、粒子与脚本，预览即电脑上的效果 |
 | 🧩 **逐层视差** | 图层逐个烘焙特效后分层导出，背屏上每层独立随手机倾斜；动画按各层自己的周期循环 |
-| 🌗 **随时段变化** | 打开“随时间变化”（实验）后，晨昏昼夜切换的壁纸导出后照样按系统时间切换，渐变时段保留过渡 |
-| 🕒 **背屏组件** | 时间、农历、步数、天气、电量等 20 个组件，字体、字号、颜色和位置自由调整，文字可选中文或英文，可存为模板批量套用 |
-| 📷 **真机镜头** | 预览按机型画出镜头的实际位置；主体被挡住时可水平翻转画面 |
+| 🌗 **随时段变化** | 打开“随时间变化”（实验）后，晨昏昼夜切换的壁纸导出后照样按系统时间切换，渐变时段保留过渡；预览时拖动时间条查看各时段 |
+| 🕒 **背屏组件** | 时间、农历、步数、天气、电量等 20 个组件，在预览上直接点选拖动，带吸附参考线；字体、字号、颜色、阴影和描边自由调整，文字可选中文或英文，排版可存为模板批量套用 |
+| 📷 **真机镜头** | 镜头位置取自小米官方背屏主题，四款机型逐一核对；主体被挡住时可水平翻转画面 |
 | 📦 **自动压缩** | 按背屏实际分辨率裁切缩小 2K/4K 素材，包体通常缩小一半以上 |
 | ⚡ **硬件加速** | 多个壁纸同时导出、多窗口并行渲染图层，视频优先使用显卡硬件编码（NVENC / QSV / AMF） |
 | 🪟 **玻璃界面** | 磨砂玻璃与参照 iOS 26 的液态玻璃两种材质，浅色、深色或跟随系统 |
+| ✏️ **随改随存** | 编辑器改动自动保存，可撤销重做；转换时留在编辑器看进度，完成后有系统通知 |
+| 🗂️ **成品管理** | 成品页保留每张壁纸在各机型上最近一次导出，可回放、查看还原差异；导出目录只放 `.mrc` |
 | 🔄 **在线更新** | 启动时检查新版本，下载校验后自动安装 |
 
 <table>
@@ -44,11 +46,11 @@
     <td align="center">拖动“预览时刻”查看各时段画面</td>
   </tr>
   <tr>
-    <td><img src="docs/assets/editor-clock.jpg" alt="时钟排版"></td>
+    <td><img src="docs/assets/editor-clock.jpg" alt="组件设置"></td>
     <td><img src="docs/assets/library-liquid.jpg" alt="液态玻璃浅色界面"></td>
   </tr>
   <tr>
-    <td align="center">时钟字体与排版</td>
+    <td align="center">组件字体、颜色与文字效果</td>
     <td align="center">液态玻璃 · 浅色</td>
   </tr>
 </table>
@@ -59,15 +61,15 @@
 
 | 系统 | 下载 | 使用方式 |
 | --- | --- | --- |
-| Windows 10/11 x64 | [映窗 0.3.0 免安装包](https://github.com/Molun0301/yingchuang/releases/download/v0.3.0/yingchuang-0.3.0-Windows-x64.zip) | 完整解压后打开“映窗.exe” |
-| Linux x86_64 | [映窗 0.3.0 AppImage](https://github.com/Molun0301/yingchuang/releases/download/v0.3.0/yingchuang-0.3.0-Linux-x86_64.AppImage) | 赋予执行权限后运行 |
+| Windows 10/11 x64 | [映窗免安装包（最新版）](https://github.com/Molun0301/yingchuang/releases/latest/download/yingchuang-Windows-x64.zip) | 完整解压后打开“映窗.exe” |
+| Linux x86_64 | [映窗 AppImage（最新版）](https://github.com/Molun0301/yingchuang/releases/latest/download/yingchuang-Linux-x86_64.AppImage) | 赋予执行权限后运行 |
 
-安装包已包含转换运行时与 FFmpeg，无需另装 Python。[全部版本](https://github.com/Molun0301/yingchuang/releases) · [0.3.0 版本说明](docs/公开文档/版本说明-0.3.0.md)
+链接始终指向最新正式版。国内下载慢可以用 [夸克网盘](https://pan.quark.cn/s/320e0f140cf6)。安装包已包含转换运行时与 FFmpeg，无需另装 Python。[全部版本](https://github.com/Molun0301/yingchuang/releases) · [最新版本说明](https://github.com/Molun0301/yingchuang/releases/latest)
 
 ## 三步上手
 
 1. 打开映窗，自动读取 Steam 中的 Wallpaper Engine 壁纸，也可以手动添加目录。
-2. 点开壁纸，选择机型，调整取景、组件和主题设置。
+2. 在设置里选好机型，点开壁纸调整画面、组件和壁纸设置，改动自动保存。
 3. 点击“转换壁纸”，得到 `.mrc` 背屏主题包，按 [背屏导入指南](docs/公开文档/背屏导入指南.md) 放到手机上。未 root、Shizuku 授权和已 root 三种方式都有说明。
 
 支持机型：小米 17 Pro、17 Pro Max、18 Pro、18 Pro Max。
@@ -92,7 +94,7 @@ AppImage 需要 FUSE 2。Ubuntu 24.04 及以上运行 `sudo apt install libfuse2
 <details>
 <summary>哪些效果无法还原？</summary>
 
-作用于整幅画面的后期层（如胶片颗粒）、鼠标交互和实时音频频谱无法拆到图层。每次导出的成品目录里，“转换报告.json”会列出具体差异。需要整幅画面完全一致时可改用录制模式。
+作用于整幅画面的后期层（如胶片颗粒）、鼠标交互和实时音频频谱无法拆到图层。成品页每个成品的“还原差异”会列出具体差异。需要整幅画面完全一致时可改用录制模式。
 </details>
 
 <details>

@@ -2,8 +2,13 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs/promises');
 const path=require('node:path');
-const {parseVdf,steamCandidates,libraryPaths,discover}=require('../desktop/discovery.cjs');
-const {ROWS,defaultDraft,cleanLayout,makeTemplate,applyTemplate,builtinTemplates}=require('../desktop/model.cjs');
+const {parseVdf,steamCandidates,libraryPaths}=require('../desktop/discovery.cjs');
+const {createLibrary,discover}=require('../desktop/library.cjs');
+const {createResources}=require('../desktop/protocol.cjs');
+const {installIpc}=require('../desktop/ipc.cjs');
+const {model,Projects}=require('../desktop/projects.cjs');
+const device={id:'xiaomi-18-pro-max',name:'小米 18 Pro Max'};
+const widget=(project,key)=>project.widgets.find(item=>item.key===key);
 const {ConversionQueue}=require('../desktop/queue.cjs');
 const {Store}=require('../desktop/store.cjs');
 
@@ -50,56 +55,61 @@ test('WE 设置：按工坊编号或规范路径匹配，兼容 Monitor0 和扁�
   }finally{await fs.rm(base,{recursive:true,force:true});}
 });
 
-test('模板只迁移布局，不带走字体、颜色、主题属性和机型',()=>{
-  const first=defaultDraft({birds:false});first.deviceId='xiaomi-17-pro';first.appearance.fonts.time='/自选字体.ttf';first.appearance.colors.time='#fa1234';first.layout.clock.rows.time.y=.73;first.layers={'4':{visible:false}};
-  const template=makeTemplate('落款',first.layout);
-  const second=defaultDraft({birds:true,clouds:'original'});second.appearance.colors.time='#ffffff';second.appearance.fonts.time='theme:font.ttf';
-  const result=applyTemplate(second,template);
-  assert.equal(result.layout.clock.rows.time.y,.73);assert.deepEqual(result.properties,second.properties);assert.deepEqual(result.appearance,second.appearance);
-  assert.equal(result.deviceId,second.deviceId);assert.deepEqual(result.layers,{});assert(!JSON.stringify(template).includes('fonts'));
-  assert.equal(applyTemplate(defaultDraft({},false),template).layout.clock.enabled,true);
-  result.layout.clock.rows.time.y=.2;assert.equal(second.layout.clock.rows.time.y,.62);assert.equal(template.layout.rows.time.y,.73);
+test('套用模板只修改排版，已有组件保留各自外观与壁纸设置',()=>{
+  const first=model.create({properties:{birds:false}});
+  Object.assign(widget(first,'time'),{font:'/自选字体.ttf',color:'#fa1234',y:.73,effect:'outline'});
+  first.layers={'4':{visible:false}};
+  const template={layout:model.templateLayout(first)};
+  const second=model.create({properties:{birds:true,clouds:'original'},hasClock:false});
+  Object.assign(widget(second,'time'),{color:'#ffffff',font:'theme:font.ttf',effect:'shadow'});
+  widget(second,'week').language='zh';
+  const result=model.applyTemplate(second,template);
+  assert.equal(result.showWidgets,true);
+  assert.equal(widget(result,'time').y,.73);
+  assert.deepEqual(widget(result,'time'),{...widget(second,'time'),y:.73});
+  assert.equal(widget(result,'week').language,'zh');
+  assert.deepEqual(result.properties,second.properties);
+  assert.deepEqual(result.layers,{});
+  assert(!('deviceId'in result));
+  assert.deepEqual(Object.keys(widget(template.layout,'time')).sort(),['align','key','size','x','y']);
+  widget(result,'time').y=.2;
+  assert.equal(widget(second,'time').y,.62);
+  assert.equal(widget(template.layout,'time').y,.73);
 });
 
-test('组件定义驱动默认排版，旧草稿补齐隐藏的新组件并保留原设置',()=>{
-  const {widgets}=require('../core/组件.json'),draft=defaultDraft();
-  assert.deepEqual(ROWS,widgets.map(widget=>widget.key));
-  for(const widget of widgets){
-    const row=draft.layout.clock.rows[widget.key];
-    assert.equal(row.visible,Boolean(widget.core));assert.equal(row.x,widget.x);assert.equal(row.size,widget.size);
-    assert.equal(draft.appearance.fonts[widget.key],'');assert.equal(draft.appearance.colors[widget.key],'');
+test('组件定义驱动默认排版，作品中只列出已放到画面上的组件',()=>{
+  const {widgets}=require('../core/组件.json'),project=model.create();
+  assert.deepEqual(model.KEYS,widgets.map(item=>item.key));
+  assert.deepEqual(project.widgets.map(item=>item.key),widgets.filter(item=>item.core).map(item=>item.key));
+  for(const definition of widgets.filter(item=>item.core)){
+    const row=widget(project,definition.key);
+    assert.equal(row.x,definition.x);assert.equal(row.size,definition.size);
+    assert.equal(row.font,'');assert.equal(row.color,'');
   }
-  const layout=cleanLayout({clock:{language:'zh',rows:{time:{visible:false,x:.81,size:92}}}});
-  assert.equal(layout.clock.rows.time.visible,false);assert.equal(layout.clock.rows.time.x,.81);assert.equal(layout.clock.rows.time.size,92);
-  assert.equal(layout.clock.language,'zh');assert.equal(layout.clock.rows.steps.visible,false);
-  assert.equal(layout.clock.rows.text.text,widgets.find(widget=>widget.key==='text').sample);
+  assert.equal(model.widget('text').text,widgets.find(item=>item.key==='text').sample);
 });
 
-test('组件语言逐行清洗，旧草稿的星期沿用原语言，其余默认中文',()=>{
+test('组件语言逐个清洗，迁移时沿用旧草稿的星期语言与行内语言',()=>{
   for(const language of ['zh','en']){
-    const layout=cleanLayout({clock:{language}});
-    for(const key of ROWS)assert.equal(layout.clock.rows[key].language,key==='week'?language:'zh');
-    const saved=cleanLayout({clock:{language,rows:{week:{language:language==='zh'?'en':'zh'},steps:{language:'en'},weather:{language:'fr'}}}});
-    assert.equal(saved.clock.rows.week.language,language==='zh'?'en':'zh');
-    assert.equal(saved.clock.rows.steps.language,'en');assert.equal(saved.clock.rows.weather.language,'zh');
+    const project=model.migrate({layout:{clock:{language,format:'24',seconds:true,rows:{
+      time:{visible:true},date:{visible:false},steps:{visible:true,language:'en'},weather:{visible:true,language:'fr'}}}}});
+    assert.equal(widget(project,'week').language,language);
+    assert.equal(widget(project,'steps').language,'en');
+    assert.equal(widget(project,'weather').language,'zh');
+    assert.equal(widget(project,'date'),undefined);
+    assert.equal(widget(project,'time').hourFormat,'24');
+    assert.equal(widget(project,'time').seconds,true);
   }
-  assert.equal(defaultDraft().layout.clock.rows.week.language,'en');
+  assert.equal(widget(model.create(),'week').language,'en');
 });
 
-test('套用新旧模板均保留草稿各行语言，缩略图保留模板的语言示例',()=>{
-  const first=defaultDraft(),second=defaultDraft();
-  first.layout.clock.rows.week.language='zh';first.layout.clock.rows.steps.language='en';first.layout.clock.rows.steps.x=.8;
-  const template=makeTemplate('双语组件',first.layout);
-  second.layout.clock.rows.weather.language='en';
-  const result=applyTemplate(second,template);
-  for(const key of ROWS)assert.equal(result.layout.clock.rows[key].language,second.layout.clock.rows[key].language);
-  assert.equal(result.layout.clock.rows.steps.x,.8);
-  assert.equal(template.layout.rows.week.language,'zh');assert.equal(template.layout.rows.steps.language,'en');
-  const legacy=defaultDraft();legacy.layout.clock.language='zh';
-  for(const key of ROWS)delete legacy.layout.clock.rows[key].language;
-  const migrated=applyTemplate(legacy,template);
-  assert.equal(migrated.layout.clock.rows.week.language,'zh');assert.equal(migrated.layout.clock.rows.steps.language,'zh');
-  assert.equal(applyTemplate(second,{layout:{...template.layout,rows:{time:template.layout.rows.time}}}).layout.clock.rows.weather.language,'en');
+test('套用旧模板时按模板选择组件，保留已存在的组件语言',()=>{
+  const project=model.create();
+  widget(project,'week').language='zh';
+  const result=model.applyTemplate(project,{layout:{language:'en',rows:{week:{visible:true,x:.8},time:{visible:false}}}});
+  assert.deepEqual(result.widgets.map(item=>item.key),['week']);
+  assert.equal(widget(result,'week').language,'zh');
+  assert.equal(widget(result,'week').x,.8);
 });
 
 test('组件示例按行语言使用英文格式与选项，中文格式保持原样',()=>{
@@ -121,41 +131,84 @@ test('组件示例按行语言使用英文格式与选项，中文格式保持�
   }
 });
 
-test('水平翻转只随草稿保存，模板双向套用均不改变当前翻转',()=>{
+test('水平翻转随作品保存，模板双向套用均保留当前翻转',()=>{
   for(const sourceFlip of [true,false])for(const targetFlip of [true,false]){
-    const first=defaultDraft();first.layout.flip=sourceFlip;first.layout.clock.rows.time.x=.88;
-    const template=makeTemplate('靠右',first.layout),second=defaultDraft();second.layout.flip=targetFlip;
-    assert.equal('flip' in template.layout,false);assert.equal(cleanLayout(first.layout).flip,sourceFlip);
-    const result=applyTemplate(second,template);
-    assert.equal(result.layout.flip,targetFlip);assert.equal(result.layout.clock.rows.time.x,.88);
+    const first=model.create();first.framing.flip=sourceFlip;widget(first,'time').x=.88;
+    const template={layout:model.templateLayout(first)},second=model.create();second.framing.flip=targetFlip;
+    assert.equal('flip' in template.layout.framing,false);assert.equal(model.normalize(first).framing.flip,sourceFlip);
+    const result=model.applyTemplate(second,template);
+    assert.equal(result.framing.flip,targetFlip);assert.equal(widget(result,'time').x,.88);
   }
 });
 
-test('组件标签与自定义文字可保存；旧模板缺少的组件保留草稿值',()=>{
-  const draft=defaultDraft();draft.layout.clock.rows.steps={visible:true,x:.45,y:.88,size:28,align:'left',label:false,language:'zh'};
-  const text='今天开心🌻'.repeat(12);draft.layout.clock.rows.text={visible:true,x:.7,y:.2,size:31,align:'right',text,language:'zh'};
-  draft.appearance.fonts.steps='/字体.ttf';draft.appearance.colors.steps='#88aa99';
-  const result=applyTemplate(draft,{layout:{scale:1.2,x:.3,y:.6,rows:{time:{visible:true,x:.9,y:.4,size:80,align:'right'}}}});
-  assert.deepEqual(result.layout.clock.rows.steps,draft.layout.clock.rows.steps);
-  assert.equal(result.layout.clock.rows.text.text,[...text].slice(0,40).join(''));assert.equal([...result.layout.clock.rows.text.text].length,40);
-  assert.deepEqual(result.appearance,draft.appearance);assert.equal(draft.layout.clock.rows.text.text,text);
-  const template=makeTemplate('组件排版',result.layout);
-  assert.equal(template.layout.rows.steps.label,false);assert.equal(template.layout.rows.text.text,result.layout.clock.rows.text.text);
+test('作品保存组件标签和自定义文字，模板只保存所选组件与排版',()=>{
+  const project=model.create(),text='今天开心🌻'.repeat(12);
+  project.widgets.push({key:'steps',label:false,font:'/字体.ttf',color:'#88aa99'},{key:'text',text});
+  const result=model.normalize(project),template=model.templateLayout(result);
+  assert.equal(widget(result,'steps').label,false);
+  assert.equal(widget(result,'steps').font,'/字体.ttf');
+  assert.equal(widget(result,'text').text,[...text].slice(0,40).join(''));
+  assert.equal(widget(project,'text').text,text);
+  assert(!('label'in widget(template,'steps')));
+  assert(!('text'in widget(template,'text')));
 });
 
 test('排版与收藏重新启动后仍在',async()=>{
   const dir=await fs.mkdtemp(path.join(__dirname,'store-'));
-  try{const a=new Store(dir);a.update(d=>{d.favorites=['wallpaper'];d.templates.push(makeTemplate('样式',defaultDraft().layout));d.drafts.wallpaper=defaultDraft({test:17});});
-    const b=new Store(dir);assert.deepEqual(b.data.favorites,['wallpaper']);assert.equal(b.data.templates[0].name,'样式');assert.equal(b.data.drafts.wallpaper.properties.test,17);assert.equal(b.snapshot().templates.length,builtinTemplates().length+1);
+  try{
+    const store=new Store(dir),projects=new Projects(store);
+    store.update(data=>{data.favorites=['wallpaper'];});
+    projects.saveTemplate('样式',model.create());
+    projects.renameTemplate(store.data.templates[0].id,'排版');
+    const reopened=new Store(dir);
+    assert.deepEqual(reopened.data.favorites,['wallpaper']);
+    assert.equal(reopened.data.templates[0].name,'排版');
+    assert.equal(reopened.snapshot().templates.length,model.builtinTemplates().length+1);
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('v1 存储读入后写回 v2，保留全局设置、作品内容与旧模板排版',async()=>{
+  const dir=await fs.mkdtemp(path.join(__dirname,'migration-')),file=path.join(dir,'映窗.json');
+  try{
+    const time={visible:true,x:.7,y:.63,size:62,align:'left'};
+    await fs.writeFile(file,JSON.stringify({version:1,favorites:['a'],settings:{deviceId:device.id},
+      drafts:{a:{version:1,deviceId:'旧机型',layout:{x:.64,flip:true,clock:{rows:{time},format:'12'}},
+        appearance:{fonts:{time:'theme:font.ttf'},colors:{time:'#ff1122'}},properties:{speed:2}}},
+      templates:[{id:'saved',name:'原模板',layout:{x:.81,clockEnabled:false,rows:{time}}}]}));
+    const migrated=new Store(dir),data=JSON.parse(await fs.readFile(file,'utf8'));
+    assert.equal(data.version,2);assert(!('drafts'in data));assert(!('deviceId'in data.projects.a));
+    assert.deepEqual(data,migrated.data);
+    assert.deepEqual(new Store(dir).data,data);
+    assert.deepEqual(data.favorites,['a']);assert.equal(data.settings.deviceId,device.id);
+    assert.equal(data.projects.a.framing.x,.64);assert.equal(data.projects.a.framing.flip,true);
+    assert.equal(widget(data.projects.a,'time').font,'theme:font.ttf');
+    assert.equal(widget(data.projects.a,'time').color,'#ff1122');
+    assert.equal(widget(data.projects.a,'time').hourFormat,'12');
+    assert.equal(data.projects.a.properties.speed,2);
+    assert.deepEqual(data.templates[0].layout,{framing:{scale:1.06,x:.81,y:.5},showWidgets:false,
+      widgets:[{key:'time',x:.7,y:.63,size:62,align:'left'}]});
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('只把壁纸设置的差异写入作品，重启后与当前默认值合并',async()=>{
+  const dir=await fs.mkdtemp(path.join(__dirname,'properties-'));
+  try{
+    const store=new Store(dir),projects=new Projects(store);
+    const theme={id:'a',propertyValues:{stars:true,level:9,tint:[1,0,0],message:'默认'}};
+    projects.save(theme,model.create({properties:{...theme.propertyValues,stars:false,level:0,message:''}}));
+    const reopened=new Store(dir);
+    assert.deepEqual(reopened.data.projects.a.properties,{stars:false,level:0,message:''});
+    const current=await new Projects(reopened).forTheme({...theme,propertyValues:{...theme.propertyValues,tint:[0,0,1],volume:50}});
+    assert.deepEqual(current.properties,{stars:false,level:0,tint:[0,0,1],message:'',volume:50});
   }finally{await fs.rm(dir,{recursive:true,force:true});}
 });
 
 test('批量任务使用快照，单项失败后继续下一项',async()=>{
   const seen=[];let release;
   const gate=new Promise(resolve=>{release=resolve;});
-  const queue=new ConversionQueue(async(input,_signal,progress)=>{await gate;seen.push(input.draft.properties.value);progress({progress:55,phase:'转换'});if(input.theme.id==='one')throw new Error('单项失败');return{folder:'/output/two'};});
-  const input={theme:{id:'one',title:'一'},draft:defaultDraft({value:'原值'})};
-  queue.add([input,{theme:{id:'two',title:'二'},draft:defaultDraft({value:'第二项'})}]);input.draft.properties.value='后来更改';release();
+  const queue=new ConversionQueue(async(input,_signal,progress)=>{await gate;seen.push(input.project.properties.value);progress({progress:55,phase:'转换'});if(input.theme.id==='one')throw new Error('单项失败');return{buildId:'two',size:20};});
+  const input={theme:{id:'one',title:'一'},project:model.create({properties:{value:'原值'}}),device};
+  queue.add([input,{theme:{id:'two',title:'二'},project:model.create({properties:{value:'第二项'}}),device}]);input.project.properties.value='后来更改';release();
   await new Promise(resolve=>{const check=items=>{if(items.every(x=>['error','done'].includes(x.status))){queue.off('change',check);resolve();}};queue.on('change',check);});
   assert.deepEqual(seen,['原值','第二项']);assert.deepEqual(queue.snapshot().map(x=>x.status),['error','done']);
 });
@@ -163,7 +216,7 @@ test('批量任务使用快照，单项失败后继续下一项',async()=>{
 test('取消停止当前任务并取消全部待处理任务',async()=>{
   let started=0;
   const queue=new ConversionQueue((_input,signal)=>new Promise((_resolve,reject)=>{started++;signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true});}));
-  queue.add(['one','two','three'].map(id=>({theme:{id,title:id},draft:defaultDraft()})));queue.cancel();
+  queue.add(['one','two','three'].map(id=>({theme:{id,title:id},project:model.create(),device})));queue.cancel();
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(started,1);assert.deepEqual(queue.snapshot().map(x=>x.status),['cancelled','cancelled','cancelled']);
 });
@@ -211,5 +264,92 @@ test('没有 type 字段的旧工程按入口文件判断网页、应用和场�
     }
     const types=Object.fromEntries((await discover([base])).themes.filter(t=>t.folder.startsWith(base)).map(t=>[t.title,t.type]));
     assert.deepEqual(types,{app:'application',page:'web',legacy:'scene',clip:'video'});
+    const app=(await discover([base])).themes.find(theme=>theme.title==='app'&&theme.folder.startsWith(base));
+    assert.equal(app.available,process.platform==='win32');
+    assert.equal(app.reason,process.platform==='win32'?undefined:'应用壁纸只能在 Windows 上录制');
   }finally{await fs.rm(base,{recursive:true,force:true});}
+});
+
+async function writeWallpaper(folder,project) {
+  await fs.mkdir(folder,{recursive:true});
+  await fs.writeFile(path.join(folder,'project.json'),JSON.stringify(project));
+}
+
+test('预设跨根目录沿用原壁纸素材和作者设置，工坊用户设置只覆盖该预设',async()=>{
+  const dir=await fs.mkdtemp(path.join(__dirname,'preset-'));
+  try{
+    const base=path.join(dir,'手动目录','100');
+    const engine=path.join(dir,'steamapps/common/wallpaper_engine');
+    const workshop=path.join(dir,'steamapps/workshop/content/431960');
+    const preset=path.join(workshop,'200'),missing=path.join(engine,'projects/myprojects','300');
+    const original={title:'原壁纸',type:'scene',file:'scene.json',preview:'preview.jpg',
+      general:{properties:{rain:{type:'bool',value:false},speed:{type:'slider',value:1},volume:{value:10}}}};
+    await writeWallpaper(base,original);
+    await fs.writeFile(path.join(base,'preview.jpg'),'封面');
+    await fs.writeFile(path.join(base,'scene.pkg'),'源素材');
+    await writeWallpaper(preset,{title:'预设壁纸',dependency:100,preset:{rain:true,speed:3}});
+    await writeWallpaper(missing,{title:'未订阅预设',dependency:'999',preview:'cover.png'});
+    await fs.writeFile(path.join(missing,'cover.png'),'自己的封面');
+    await fs.writeFile(path.join(engine,'config.json'),JSON.stringify({user:{wproperties:{
+      'D:/steamapps/workshop/content/431960/200/project.json':{Monitor0:{volume:{value:0}}},
+      [base]:{speed:9,volume:22},
+    }}}));
+
+    const store=new Store(path.join(dir,'data'));store.data.settings.roots=[dir,path.dirname(base)];
+    const resources=createResources(dir);
+    const library=createLibrary({store,resources,onScan(){},onChange(){}});
+    try{
+      await library.scan();
+      const theme=library.themeById('200'),unavailable=library.current.themes.find(item=>item.title==='未订阅预设');
+      const baseTheme=library.current.themes.find(item=>item.title==='原壁纸');
+      assert.match(baseTheme.id,/^[a-f0-9]{20}$/);assert.equal(baseTheme.workshopId,'');
+      assert.match(unavailable.id,/^[a-f0-9]{20}$/);
+      assert.equal(theme.title,'预设壁纸');assert.equal(theme.ownFolder,preset);assert.equal(theme.folder,base);
+      assert.equal(theme.source,path.join(base,'scene.pkg'));assert.equal(theme.preview,path.join(base,'preview.jpg'));
+      assert.deepEqual(theme.propertyValues,{rain:true,speed:3,volume:0});
+      assert.deepEqual(theme.properties.map(item=>item.value),[true,3,10]);
+      assert.deepEqual(library.liveTheme(theme).project,original);
+      assert.deepEqual(library.publicTheme(theme).preset,{base:'100',baseTitle:'原壁纸',missing:false});
+      assert.equal(library.publicTheme(theme).available,true);
+      assert.equal(unavailable.preview,path.join(missing,'cover.png'));
+      assert.equal(unavailable.available,false);
+      assert.deepEqual(unavailable.preset,{base:'999',baseTitle:'',missing:true});
+      const opened=[];
+      const {handlers}=installIpc({ipcMain:{handle(){}},store,library,resources,workers:{},
+        shell:{openPath:folder=>opened.push(folder)},pipeline:{inspect:()=>assert.fail('缺失原壁纸时不能请求 Python')},previews:{}});
+      await assert.rejects(handlers.get('detail')(unavailable.id),{message:'需要先在 Steam 订阅原壁纸'});
+      await handlers.get('open-theme')('200');assert.deepEqual(opened,[preset]);
+    }finally{library.close();}
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('扫描迁移旧工坊路径键和 v1 全量属性，保留新键已有的作品与成品',async()=>{
+  const {createHash}=require('node:crypto');
+  const dir=await fs.mkdtemp(path.join(__dirname,'identity-'));
+  try{
+    const root=path.join(dir,'steamapps/workshop/content/431960'),first=path.join(root,'41'),second=path.join(root,'42');
+    const source={type:'scene',general:{properties:{rain:{value:true},speed:{value:1}}}};
+    await writeWallpaper(first,source);await writeWallpaper(second,source);
+    const key=async folder=>createHash('sha256').update(await fs.realpath(folder)).digest('hex').slice(0,20);
+    const old=await key(first),conflict=await key(second);
+    const folder=path.join(dir,'data');await fs.mkdir(folder);
+    const file=path.join(folder,'映窗.json');
+    await fs.writeFile(file,JSON.stringify({version:1,favorites:[old,conflict,'42'],settings:{roots:[dir]},templates:[],
+      drafts:{[old]:{properties:{rain:true,speed:3}},[conflict]:{properties:{speed:7}},'42':{properties:{speed:9}}},
+      builds:[{id:'1',themeId:old,deviceId:'a'},{id:'2',themeId:conflict,deviceId:'b'},
+        {id:'3',themeId:'42',deviceId:'b'},{id:'4',themeId:conflict,deviceId:'c'}]}));
+    const store=new Store(folder);
+    const library=createLibrary({store,resources:createResources(dir),onScan(){},onChange(){}});
+    try{
+      await library.scan();
+      const data=JSON.parse(await fs.readFile(file,'utf8'));
+      assert.deepEqual(data.favorites,['41',conflict,'42']);
+      assert.deepEqual(data.projects['41'].properties,{speed:3});assert(!Object.hasOwn(data.projects,old));
+      assert.deepEqual(data.projects['42'].properties,{speed:9});
+      assert.deepEqual(data.projects[conflict].properties,{speed:7});
+      assert.deepEqual(data.builds.map(record=>record.themeId),['41',conflict,'42','42']);
+      const project=await new Projects(store).forTheme(library.themeById('41'));
+      assert.deepEqual(project.properties,{rain:true,speed:3});
+    }finally{library.close();}
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
 });

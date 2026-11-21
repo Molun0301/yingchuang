@@ -68,15 +68,19 @@ class SceneAssets:
             if error:
                 raise error
 
-    def builtin(self, path):
+    def builtin_file(self, path):
         parts = PurePosixPath(path.replace("\\", "/"))
         if parts.is_absolute() or ".." in parts.parts or ":" in path:
             raise ValueError("引擎内置资源路径无效")
         for root in self.engine_roots:
             file = (root / parts).resolve()
             if file.is_relative_to(root.resolve()) and file.is_file() and file.stat().st_size <= 128*1024*1024:
-                return file.read_bytes()
+                return file
         return None
+
+    def builtin(self, path):
+        file = self.builtin_file(path)
+        return file.read_bytes() if file is not None else None
 
     def read(self, path):
         if self.package.has(path):
@@ -92,13 +96,18 @@ class SceneAssets:
             raise ValueError("资源描述过大")
         return json.loads(data.decode("utf-8-sig"))
 
-    def texture_bytes(self, name):
+    @staticmethod
+    def texture_path(name):
         if not isinstance(name, str) or not name:
             raise ValueError("图层没有纹理路径")
         name = name.replace("\\", "/")
         path = name if name.startswith("materials/") else "materials/" + name
         if not path.lower().endswith((".tex", ".png", ".jpg", ".jpeg", ".webp")):
             path += ".tex"
+        return path
+
+    def texture_bytes(self, name):
+        path = self.texture_path(name)
         if path in self.textures:
             return self.textures[path]
         if self.package.has(path):

@@ -8,10 +8,10 @@ const {frameScene}=require('../desktop/framing.cjs');
 
 // 直接运行主进程的生产函数，用合成 worker/录制接口检查跨进程数据，不启动 Electron。
 function mainFunctions(context){
-  const source=fs.readFileSync(path.join(__dirname,'../desktop/main.cjs'),'utf8');
+  const source=fs.readFileSync(path.join(__dirname,'../desktop/pipeline.cjs'),'utf8');
   const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
-  const code=section('function withBaked(', '/** 观察与查色表')+
-    section('async function bakeLayers(', '/**\n * 按图层缓存')+
+  const code=section('const BAKE=', '/**\n   * 逐层烘焙')+section('function withBaked(', '/** 观察与查色表')+
+    section('async function bakeLayers(', '/**\n   * 按图层缓存')+
     section('async function cachedGroup(', '/** 原始帧');
   return vm.runInNewContext(code+'\n({bakeLayers,cachedGroup,withBaked})',context);
 }
@@ -28,8 +28,8 @@ test('主进程烘焙接线：曲线参考场景、合并成员状态、调色�
   const plans=[{targets:[{id:1,members:[11]},{id:2},{id:3}],adjust:adjustments},
     {targets:[{id:2}],adjust:adjustments},{targets:[{id:2},{id:3}],adjust:adjustments}];
   let measurements,baking,planning;
-  const functions=mainFunctions({path,createHash:require('node:crypto').createHash,sceneState,frameScene,BAKE:{fps:15,seconds:4,maxSeconds:12,fade:.5,warmup:1,version:10},
-    app:{getPath:()=>'/测试缓存'},os:{cpus:()=>Array(8).fill({})},rendererUrl:()=>'/渲染页',liveTheme:()=>({key:'主题'}),
+  const functions=mainFunctions({path,createHash:require('node:crypto').createHash,sceneState,frameScene,
+    userData:'/测试缓存',os:{cpus:()=>Array(8).fill({})},rendererUrl:()=>'/渲染页',liveTheme:()=>({key:'主题'}),
     inspect:async()=>({sourceSize:[100,80],scriptInput:{scene:original}}),
     livePatch:async()=>({hidden:[],layers:{},fonts:{}}),
     observationJob:async()=>({mode:'lut',patch:{hidden:[],transparent:false},full:{width:320,height:256}}),
@@ -39,9 +39,10 @@ test('主进程烘焙接线：曲线参考场景、合并成员状态、调色�
     bake:async({tasks})=>{baking=tasks;return tasks.map(task=>Object.fromEntries(task.job.targets.map(id=>[id,{dir:task.dirs[id],count:1}])));},
     pruneBakes:async()=>{},holdBakes:()=>{},releaseBakes:()=>{},
   });
-  const output=await functions.bakeLayers({id:'主题',source:'scene.pkg',resolvedScene:current},{properties:{},layers:{},layout:{scale:1,x:.5,y:.5},motion:{amount:0,vertical:0}},
+  const output=await functions.bakeLayers({id:'主题',source:'scene.pkg',resolvedScene:current},{properties:{},layers:{},framing:{scale:1,x:.5,y:.5},motion:{amount:0,vertical:0}},
     {width:100,height:80},new AbortController().signal,()=>{},variants);
   assert.deepEqual(Array.from(planning.varying),[2,3]);
+  assert.equal(planning.project.framing.scale,1);
   assert.equal(measurements.length,1);assert.equal(measurements[0].key,'lut@now');
   const lut=measurements[0].job;
   assert.deepEqual(Array.from(lut.lut.targets),[20,21]);assert.equal(lut.lut.size,9);
@@ -63,10 +64,10 @@ test('主进程烘焙接线：曲线参考场景、合并成员状态、调色�
 async function bakingCase({objects,sceneAt=()=>({objects}),minutes=[0,720],adjust=[],daytimeLayerIds=[],targets=[{id:1}]}){
   const original={objects},measurements=[],baking=[],files=new Map();
   const theme={id:'主题',source:'scene.pkg',resolvedScene:sceneAt(30)};
-  const draft={properties:{},layers:{},layout:{scale:1,x:.5,y:.5},motion:{amount:0,vertical:0}},device={width:100,height:80};
+  const project={properties:{},layers:{},framing:{scale:1,x:.5,y:.5},motion:{amount:0,vertical:0}},device={width:100,height:80};
   const variants={scenes:minutes.map(sceneAt),minutes,curves:{},objects:Object.fromEntries(targets.map(({id})=>[id,minutes.map((minute,scene)=>({minute,scene,alpha:[[0,1],[1440,1]]}))]))};
-  const functions=mainFunctions({path,createHash:require('node:crypto').createHash,sceneState,frameScene,BAKE:{fps:15,seconds:4,maxSeconds:12,fade:.5,warmup:1,version:10},
-    app:{getPath:()=>'/测试缓存'},os:{cpus:()=>Array(8).fill({})},rendererUrl:()=>'/渲染页',liveTheme:()=>({key:'主题'}),
+  const functions=mainFunctions({path,createHash:require('node:crypto').createHash,sceneState,frameScene,
+    userData:'/测试缓存',os:{cpus:()=>Array(8).fill({})},rendererUrl:()=>'/渲染页',liveTheme:()=>({key:'主题'}),
     inspect:async()=>({sourceSize:[100,80],scriptInput:{scene:original},daytimeLayerIds}),
     livePatch:async()=>({hidden:[],layers:{},fonts:{}}),
     observationJob:async()=>({mode:'lut',patch:{hidden:[],transparent:false}}),
@@ -80,7 +81,7 @@ async function bakingCase({objects,sceneAt=()=>({objects}),minutes=[0,720],adjus
     bake:async({tasks})=>{baking.push(...tasks);return tasks.map(task=>Object.fromEntries(task.job.targets.map(id=>[id,{dir:task.dirs[id],count:1}])));},
     pruneBakes:async()=>{},holdBakes:()=>{},releaseBakes:()=>{},
   });
-  const run=()=>functions.bakeLayers(theme,draft,device,new AbortController().signal,()=>{},variants);
+  const run=()=>functions.bakeLayers(theme,project,device,new AbortController().signal,()=>{},variants);
   return {output:await run(),measurements,baking,files,run};
 }
 
@@ -158,7 +159,7 @@ test('烘焙共用按层处理，同组中其他内容变化的图层继续独�
 
 /** 使用真实 QuickJS 与规划模块，只替换观察窗口入口，检查是否真的跳过渲染器。 */
 function timeAnalysis(detail){
-  const source=fs.readFileSync(path.join(__dirname,'../desktop/main.cjs'),'utf8');
+  const source=fs.readFileSync(path.join(__dirname,'../desktop/pipeline.cjs'),'utf8');
   const code=source.slice(source.indexOf('async function timeVariantsFor('),source.indexOf('/** 把各状态代表时刻'));
   const {sceneEvaluator,scriptInput}=require('../desktop/scenescript.cjs');
   const {planTimeVariants,localMinute}=require('../desktop/timevariants.cjs');

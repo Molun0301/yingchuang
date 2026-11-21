@@ -3,6 +3,7 @@ from copy import deepcopy
 from io import StringIO
 import gzip
 import json
+import math
 import os
 from pathlib import Path
 import struct
@@ -11,7 +12,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
-from PIL import Image,ImageDraw
+from PIL import Image,ImageDraw,ImageFont
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'core'))
@@ -40,10 +41,11 @@ def scene_request(tmp_path):
         {'id':4,'name':'文字','text':'12:34'}]})
     scratch=tmp_path/'工作';scratch.mkdir()
     return {'operation':'layer-plan','theme':{'type':'scene','title':'逐层样例','source':str(source/'scene.json'),'engineRoots':[]},
-            'draft':{'layout':{'scale':1,'x':.5,'y':.5,'clock':{'enabled':False,'rows':{}}},
+            'project':{'version':2,'framing':{'scale':1,'x':.5,'y':.5},'showWidgets':False,'widgets':[],
                      'motion':{'fps':30},'properties':{},'layers':{}},
             'device':{'name':'测试背屏','width':320,'height':240},'cacheRoot':str(tmp_path/'缓存'),
-            'scratchRoot':str(scratch),'outputDirectory':str(tmp_path/'成品')}
+            'scratchRoot':str(scratch),'exportStagingRoot':str(tmp_path),
+            'buildDirectory':str(tmp_path/'builds'/'成品'),'outputFile':str(tmp_path/'导出'/'壁纸.mrc')}
 
 
 def edit_scene(request):
@@ -52,6 +54,60 @@ def edit_scene(request):
 
 def save_scene(request,scene):
     write_json(Path(request['theme']['source']),scene)
+
+
+def test_inspect_returns_normalized_world_aligned_boxes(scene_request):
+    scene=edit_scene(scene_request)
+    scene['objects']=[
+        {'id':10,'visible':False,'origin':'31 24 0','scale':'2 1 1','angles':[0,0,math.pi/2]},
+        {'id':1,'parent':10,'image':'models/picture.json','origin':'5 4 0','size':'12 8'},
+        {'id':2,'image':'models/picture.json','origin':'32 24 0'},
+        {'id':3,'text':'Hi','origin':'60 4 0','size':'16 12'},
+        {'id':4,'particle':'particles/unknown.json'},
+        {'id':5,'image':'models/unknown.json'},
+    ]
+    save_scene(scene_request,scene)
+    layers={layer['id']:layer for layer in bridge.inspect_theme(scene_request)['layers']}
+    assert layers['1']['visible'] is False and layers['1']['box']==pytest.approx([23/64,2/48,31/64,26/48])
+    assert layers['2']['box']==[0,0,1,1]
+    assert layers['3']['box']==pytest.approx([52/64,38/48,1,1])
+    assert layers['4']['box'] is None and layers['5']['box'] is None
+
+
+def test_layer_thumbnails_dispatch_and_cache_per_layer(scene_request,monkeypatch):
+    source=Path(scene_request['theme']['source']).parent
+    (source/'font.ttf').write_bytes(Path(ImageFont.truetype('DejaVuSans.ttf',12).path).read_bytes())
+    scene=edit_scene(scene_request)
+    scene['objects']=[
+        scene['objects'][0],
+        {'id':4,'text':'Hello','font':'font.ttf','size':'160 70','visible':False},
+        {'id':5,'particle':'particles/unknown.json'},
+    ]
+    save_scene(scene_request,scene)
+    request={**scene_request,'operation':'layer-thumbnails','ids':[1,'4',5,999]}
+    stdout=StringIO()
+    monkeypatch.setattr(sys,'stdin',StringIO(json.dumps(request)))
+    monkeypatch.setattr(sys,'stdout',stdout)
+    bridge.main()
+    thumbs=json.loads(stdout.getvalue())['result']['thumbnails']
+    assert set(thumbs)=={'1','4'}
+    for identifier,path in thumbs.items():
+        path=Path(path)
+        assert path.parent==Path(request['cacheRoot'])/'thumbs'
+        with Image.open(path) as png:
+            assert png.format=='PNG' and max(png.size)==96 and png.getbbox()
+            if identifier=='1':assert png.size==(96,72) and png.getpixel((30,25))==(52,86,120,255)
+    times={path:Path(path).stat().st_mtime_ns for path in thumbs.values()}
+    assert bridge.layer_thumbnails(scene_request)=={'thumbnails':thumbs}
+    assert all(Path(path).stat().st_mtime_ns==mtime for path,mtime in times.items())
+    assert bridge.layer_thumbnails({**request,'ids':['4']})=={'thumbnails':{'4':thumbs['4']}}
+    request['project']['layers']['4']={'text':'Different text','color':'1 0 0'}
+    changed=bridge.layer_thumbnails(request)['thumbnails']
+    assert changed['1']==thumbs['1'] and changed['4']!=thumbs['4']
+    assert Path(changed['4']).read_bytes()!=Path(thumbs['4']).read_bytes()
+    Image.new('RGBA',(64,48),'#ee88aa').save(source/'materials/picture.png')
+    refreshed=bridge.layer_thumbnails(request)['thumbnails']
+    assert refreshed['1']!=thumbs['1'] and refreshed['4']==changed['4']
 
 
 def baked_frames(tmp_path,name,static=False,size=(40,30),count=20,bbox=(7,11,24,18)):
@@ -245,9 +301,9 @@ def test_small_moving_square_in_large_frames_remains_animated(scene_request,tmp_
 
 def test_baked_cache_key_tracks_metadata_and_raw_file_changes(scene_request,tmp_path):
     baked={'2':baked_frames(tmp_path,'动态')}
-    theme,draft=scene_request['theme'],scene_request['draft']
-    original=bridge.graphic_key(theme,draft,baked)
-    assert original!=bridge.graphic_key(theme,draft)
+    theme,project=scene_request['theme'],scene_request['project']
+    original=bridge.graphic_key(theme,project,baked)
+    assert original!=bridge.graphic_key(theme,project)
     for field,value in [('dir',str(tmp_path/'新目录')),('count',19),('width',39),('height',29),('fps',20.),('bbox',[0,0,20,20])]:
         changed=deepcopy(baked);changed['2'][field]=value
         if field=='dir':
@@ -255,14 +311,14 @@ def test_baked_cache_key_tracks_metadata_and_raw_file_changes(scene_request,tmp_
             original_file=Path(baked['2']['dir'])/'frames.rgba.gz';stat=original_file.stat()
             (folder/'frames.rgba.gz').write_bytes(original_file.read_bytes())
             os.utime(folder/'frames.rgba.gz',ns=(stat.st_atime_ns,stat.st_mtime_ns))
-        assert bridge.graphic_key(theme,draft,changed)!=original
+        assert bridge.graphic_key(theme,project,changed)!=original
     path=Path(baked['2']['dir'])/'frames.rgba.gz';stat=path.stat()
     path.write_bytes(path.read_bytes()+b'\0')
     os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns))
-    assert bridge.graphic_key(theme,draft,baked)!=original
+    assert bridge.graphic_key(theme,project,baked)!=original
     path.write_bytes(path.read_bytes()[:-1])
     os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns+1_000_000))
-    assert bridge.graphic_key(theme,draft,baked)!=original
+    assert bridge.graphic_key(theme,project,baked)!=original
 
 def test_baked_layers_keep_individual_fractional_rates_in_preview_and_manifest(scene_request,tmp_path,monkeypatch):
     import 画质压缩

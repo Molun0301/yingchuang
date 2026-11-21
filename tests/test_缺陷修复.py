@@ -80,10 +80,11 @@ def request_for_scene(tmp_path,image_path='materials/picture.png'):
     (source/'models/image.json').write_text(json.dumps({'material':'materials/image.json'}))
     (source/'materials/image.json').write_text(json.dumps({'passes':[{'shader':'genericimage4','textures':[image_path]}]}))
     (tmp_path/'jobs').mkdir()
-    draft={'layout':{'scale':1.06,'x':.5,'y':.5,'clock':{'enabled':False,'rows':{}}},'motion':{'fps':30},'properties':{},'layers':{}}
-    return {'operation':'preview','theme':{'type':'scene','source':str(source/'scene.json'),'title':'day 图层'},'draft':draft,
+    project={'version':2,'framing':{'scale':1.06,'x':.5,'y':.5},'showWidgets':False,'widgets':[],'motion':{'fps':30},'properties':{},'layers':{}}
+    return {'operation':'preview','theme':{'type':'scene','source':str(source/'scene.json'),'title':'day 图层'},'project':project,
             'device':{'width':976,'height':596,'name':'测试机型'},'cacheRoot':str(tmp_path/'cache'),
-            'scratchRoot':str(tmp_path/'jobs'),'outputDirectory':str(tmp_path/'导出')}
+            'scratchRoot':str(tmp_path/'jobs'),'exportStagingRoot':str(tmp_path),
+            'buildDirectory':str(tmp_path/'builds'/'成品'),'outputFile':str(tmp_path/'导出'/'壁纸.mrc')}
 
 
 def test_image_named_day_is_not_removed_as_a_clock(tmp_path):

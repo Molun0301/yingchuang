@@ -1,7 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { createHash } = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const execFileAsync = promisify(execFile);
@@ -73,51 +72,21 @@ async function windowsSteamRoots() {
   return roots;
 }
 
-function plainText(value) {
-  return String(value ?? '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
-    .replace(/[\u200b-\u200f\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
-}
+function isWorkshop(folder) { return /(?:^|[\\/])workshop[\\/]content[\\/]431960$/i.test(folder); }
 
-function normalizeProperties(project) {
-  const dict = project.general?.properties || {};
-  const labels = { ui_browse_properties_scheme_color: '主题颜色',
-    ui_browse_properties_schemecolor: '主题颜色', ui_browse_properties_volume: '音量',
-    ui_browse_properties_playbackspeed: '播放速度' };
-  return Object.entries(dict).filter(([,v]) => v && typeof v === 'object').map(([key,v]) => {
-    const type = String(v.type || ('value' in v ? 'textinput' : 'text')).toLowerCase();
-    return { ...v, key, type, label: labels[v.text] || plainText(v.text) || key,
-      options: Array.isArray(v.options) ? v.options.map(o => ({ ...o, label: plainText(o.label) })) : undefined };
-  }).sort((a,b) => (a.order ?? a.index ?? 999) - (b.order ?? b.index ?? 999));
-}
-
-/** WE 按用户、壁纸路径存设置；同一创意工坊壁纸换过库目录后仍沿用这些值。 */
-function wallpaperValues(configs, folder, properties) {
-  const normalize = value => value.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase();
-  const themePath = normalize(folder), workshop = themePath.match(/\/431960\/(\d+)(?:\/|$)/)?.[1];
-  const values = Object.fromEntries(properties.filter(p => 'value' in p).map(p => [p.key, p.value]));
-  const keys = new Set(properties.map(p => p.key));
-  for (const config of configs) for (const user of Object.values(config)) {
-    for (const [location, saved] of Object.entries(user.wproperties || {})) {
-      const normalized = normalize(location);
-      if (normalized !== themePath && !(workshop && (normalized + '/').includes(`/431960/${workshop}/`))) continue;
-      const table = Object.keys(saved).some(key => /^Monitor/i.test(key)) ? saved.Monitor0 ?? Object.values(saved)[0] : saved;
-      for (const [key, value] of Object.entries(table)) if (keys.has(key))
-        values[key] = value && typeof value === 'object' && 'value' in value ? value.value : value;
-    }
-  }
-  return values;
-}
-
-async function discover(extraRoots = []) {
+async function discoverFolders(extraRoots) {
   const candidates = [...steamCandidates(), ...await windowsSteamRoots(), ...extraRoots];
-  const librarySet = new Set(), scanned = new Set(), folders = new Set(), engines = new Set();
+  const librarySet = new Set(), scanned = new Set(), folders = new Map(), engines = new Set(), manual = new Set();
   for (const candidate of candidates) {
     if (!candidate || !await exists(candidate)) continue;
     const real = await fs.realpath(candidate);
+    if (extraRoots.includes(candidate)) manual.add(real);
     if (scanned.has(real)) continue;
     scanned.add(real);
-    if (await readJson(path.join(real, 'project.json'))) folders.add(real);
+    if (await readJson(path.join(real, 'project.json'))) {
+      const name=path.basename(path.resolve(candidate));
+      folders.set(real,isWorkshop(path.dirname(path.resolve(candidate)))&&/^\d+$/.test(name)?name:'');
+    }
     for (const file of [path.join(real, 'steamapps/libraryfolders.vdf'), path.join(real, 'libraryfolders.vdf')]) {
       try {
         const libs = libraryPaths(parseVdf(await fs.readFile(file, 'utf8')));
@@ -135,48 +104,21 @@ async function discover(extraRoots = []) {
     if (await exists(path.join(engine, 'assets'))) engines.add(path.join(engine, 'assets'));
     const searches = [path.join(steamapps, 'workshop/content/431960'),
       path.join(engine, 'projects/myprojects'), path.join(engine, 'projects/defaultprojects')];
-    if (extraRoots.includes(library)) searches.push(library, path.join(library, 'projects/myprojects'), path.join(library, 'workshop/content/431960'));
+    if (manual.has(library)) searches.push(library, path.join(library, 'projects/myprojects'),
+      path.join(library, 'projects/defaultprojects'), path.join(library, 'workshop/content/431960'));
     for (const folder of searches) {
       if (!await exists(folder)) continue;
       const real = await fs.realpath(folder);
       if (!roots.includes(real)) roots.push(real);
-      for (const child of await directories(real)) folders.add(child);
+      for (const child of await directories(real)) {
+        const name=path.basename(child);
+        if(isWorkshop(folder)&&/^\d+$/.test(name))folders.set(child,name);
+        else if(!folders.has(child))folders.set(child,'');
+      }
     }
     if (await exists(path.join(library, 'assets'))) engines.add(path.join(library, 'assets'));
   }
-  const themes = [];
-  const unique = new Set();
-  for (const folder of folders) {
-    const project = await readJson(path.join(folder, 'project.json'));
-    if (!project) continue;
-    const real = await fs.realpath(folder);
-    if (unique.has(real)) continue;
-    unique.add(real);
-    const stat = await fs.stat(path.join(real, 'project.json'));
-    let preview = project.preview ? path.resolve(real, project.preview) : '';
-    // 早期官方工程没有 type 字段，按入口文件判断类型。
-    const extension = path.extname(String(project.file || '')).toLowerCase();
-    const inferred = ['.html', '.htm'].includes(extension) ? 'web' : extension === '.exe' ? 'application'
-      : ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v', '.wmv', '.ogv'].includes(extension) ? 'video' : 'scene';
-    const sourceType = String(project.type || inferred).toLowerCase();
-    let source = path.resolve(real, project.file || 'scene.pkg');
-    if (sourceType === 'scene') {
-      try { await fs.access(path.join(real, 'scene.pkg')); source = path.join(real, 'scene.pkg'); } catch {}
-    }
-    if (!preview) {
-      for (const ext of ['jpg', 'png', 'gif', 'webp']) {
-        try { await fs.access(path.join(real, `preview.${ext}`)); preview = path.join(real, `preview.${ext}`); break; } catch {}
-      }
-    }
-    const props = normalizeProperties(project);
-    themes.push({ id: createHash('sha256').update(real).digest('hex').slice(0, 20),
-      workshopId: /^\d+$/.test(path.basename(real)) ? path.basename(real) : '',
-      title: plainText(project.title) || path.basename(real), folder: real, source, type: sourceType,
-      preview, properties: props, propertyValues: wallpaperValues(configs, real, props),
-      modified: stat.mtimeMs, author: plainText(project.author), engineRoots: [...engines], project });
-  }
-  themes.sort((a,b) => b.modified - a.modified || a.title.localeCompare(b.title, 'zh-CN'));
-  return { themes, roots, engineRoots: [...engines] };
+  return { folders, roots, configs, engineRoots: [...engines] };
 }
 
-module.exports = { parseVdf, steamCandidates, libraryPaths, discover, normalizeProperties, plainText };
+module.exports = { parseVdf, steamCandidates, libraryPaths, readJson, discoverFolders };

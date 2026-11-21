@@ -1,0 +1,259 @@
+diff --git a/node_modules/webwallgl/webwallgl.mjs b/node_modules/webwallgl/webwallgl.mjs
+index 783c0c3..6219ab5 100644
+--- a/node_modules/webwallgl/webwallgl.mjs
++++ b/node_modules/webwallgl/webwallgl.mjs
+@@ -13593,107 +13593,110 @@ function createRenderer(canvas, opts = {}) {
+       container.groupTex = null;
+     }
+   }
+-  async function renderLayer(layer, textures2, cam, viewProj, width, height, time) {
+-    if (layer.isLight && !layer.image && !layer.isText && !layer.particle && !layer.isComponent) return;
+-    const isPuppet = !!(layer.puppet && puppetDrawFn);
+-    const texObj = !layer.solid && layer.textureName ? textures2.get(layer.textureName) : null;
+-    if (texObj && texObj.video) {
+-      const v = texObj.video;
+-      if (v.readyState >= 2 && v.currentTime !== texObj.lastUploaded) {
+-        gl.bindTexture(gl.TEXTURE_2D, texObj.glTex);
+-        try {
+-          let vw = v.videoWidth || texObj.width;
+-          let vh = v.videoHeight || texObj.height;
+-          const targetMax = Math.max(width || 0, height || 0);
+-          const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+-          let limit = VIDEO_TEX_HARD_CAP;
+-          if (maxTex > 0) limit = Math.min(limit, maxTex);
+-          if (targetMax > 0) limit = Math.min(limit, targetMax);
+-          limit = Math.max(limit, VIDEO_TEX_MIN_CAP);
+-          const footprint = videoLayerFootprintPx(layer, width, height);
+-          if (footprint > 0) limit = Math.min(limit, Math.max(VIDEO_TEX_ADAPTIVE_MIN, footprint));
+-          if (videoTexScale < 1) {
+-            limit = Math.min(limit, Math.max(VIDEO_TEX_ADAPTIVE_MIN, limit * videoTexScale));
+-          }
+-          let scale = 1;
+-          if (Math.max(vw, vh) > limit) scale = limit / Math.max(vw, vh);
+-          const uw = Math.max(1, Math.round(vw * scale));
+-          const uh = Math.max(1, Math.round(vh * scale));
+-          let src = v;
+-          if (videoDirectFailed && videoCanvas && uw > 0 && uh > 0) {
+-            if (videoCanvas.width !== uw || videoCanvas.height !== uh) {
+-              videoCanvas.width = uw;
+-              videoCanvas.height = uh;
+-            }
+-            const vctx = videoCanvas.getContext("2d");
+-            if (vctx) {
+-              vctx.clearRect(0, 0, uw, uh);
+-              vctx.drawImage(v, 0, 0, uw, uh);
+-              src = videoCanvas;
+-            }
++  // 视频贴图的当前帧传到显卡。图层自身画面与效果通道输入共用：效果引用的视频贴图
++  // 不一定有可见图层拿它当自身画面（所属图层隐藏，或只给效果用），只在 renderLayer 开头上传会一直停在 1×1 透明占位。
++  function uploadVideoFrame(texObj, layer, width, height) {
++    const v = texObj.video;
++    if (v.readyState >= 2 && v.currentTime !== texObj.lastUploaded) {
++      gl.bindTexture(gl.TEXTURE_2D, texObj.glTex);
++      try {
++        let vw = v.videoWidth || texObj.width;
++        let vh = v.videoHeight || texObj.height;
++        const targetMax = Math.max(width || 0, height || 0);
++        const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
++        let limit = VIDEO_TEX_HARD_CAP;
++        if (maxTex > 0) limit = Math.min(limit, maxTex);
++        if (targetMax > 0) limit = Math.min(limit, targetMax);
++        limit = Math.max(limit, VIDEO_TEX_MIN_CAP);
++        const footprint = videoLayerFootprintPx(layer, width, height);
++        if (footprint > 0) limit = Math.min(limit, Math.max(VIDEO_TEX_ADAPTIVE_MIN, footprint));
++        if (videoTexScale < 1) {
++          limit = Math.min(limit, Math.max(VIDEO_TEX_ADAPTIVE_MIN, limit * videoTexScale));
++        }
++        let scale = 1;
++        if (Math.max(vw, vh) > limit) scale = limit / Math.max(vw, vh);
++        const uw = Math.max(1, Math.round(vw * scale));
++        const uh = Math.max(1, Math.round(vh * scale));
++        let src = v;
++        if (videoDirectFailed && videoCanvas && uw > 0 && uh > 0) {
++          if (videoCanvas.width !== uw || videoCanvas.height !== uh) {
++            videoCanvas.width = uw;
++            videoCanvas.height = uh;
+           }
+-          const uploadT0 = typeof performance !== "undefined" ? performance.now() : 0;
+-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+-          if (uploadT0 > 0) {
+-            const cost = performance.now() - uploadT0;
+-            videoUploadCostMs = videoUploadCostMs > 0 ? videoUploadCostMs * 0.8 + cost * 0.2 : cost;
++          const vctx = videoCanvas.getContext("2d");
++          if (vctx) {
++            vctx.clearRect(0, 0, uw, uh);
++            vctx.drawImage(v, 0, 0, uw, uh);
++            src = videoCanvas;
+           }
+-          {
+-            const nowMs = typeof performance !== "undefined" ? performance.now() : 0;
+-            if (!videoUploadWindowAt) videoUploadWindowAt = nowMs;
+-            videoUploadCount++;
+-            const span = nowMs - videoUploadWindowAt;
+-            if (span >= 1e3) {
+-              videoUploadsPerSec = Math.round(videoUploadCount * 1e3 / span);
+-              videoUploadCount = 0;
+-              videoUploadWindowAt = nowMs;
+-            }
++        }
++        const uploadT0 = typeof performance !== "undefined" ? performance.now() : 0;
++        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
++        if (uploadT0 > 0) {
++          const cost = performance.now() - uploadT0;
++          videoUploadCostMs = videoUploadCostMs > 0 ? videoUploadCostMs * 0.8 + cost * 0.2 : cost;
++        }
++        {
++          const nowMs = typeof performance !== "undefined" ? performance.now() : 0;
++          if (!videoUploadWindowAt) videoUploadWindowAt = nowMs;
++          videoUploadCount++;
++          const span = nowMs - videoUploadWindowAt;
++          if (span >= 1e3) {
++            videoUploadsPerSec = Math.round(videoUploadCount * 1e3 / span);
++            videoUploadCount = 0;
++            videoUploadWindowAt = nowMs;
+           }
+-          if (!videoDirectChecked) {
+-            videoDirectChecked = true;
+-            if (gl.getError() !== gl.NO_ERROR && videoCanvas) {
+-              videoDirectFailed = true;
+-              try {
+-                if (videoCanvas.width !== uw || videoCanvas.height !== uh) {
+-                  videoCanvas.width = uw;
+-                  videoCanvas.height = uh;
+-                }
+-                const vctx2 = videoCanvas.getContext("2d");
+-                if (vctx2) {
+-                  vctx2.clearRect(0, 0, uw, uh);
+-                  vctx2.drawImage(v, 0, 0, uw, uh);
+-                  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoCanvas);
+-                  for (let drain = 0; drain < 16; drain++) {
+-                    const glErr = gl.getError();
+-                    if (glErr === gl.NO_ERROR) break;
+-                    if (glErr === gl.CONTEXT_LOST_WEBGL) break;
+-                  }
++        }
++        if (!videoDirectChecked) {
++          videoDirectChecked = true;
++          if (gl.getError() !== gl.NO_ERROR && videoCanvas) {
++            videoDirectFailed = true;
++            try {
++              if (videoCanvas.width !== uw || videoCanvas.height !== uh) {
++                videoCanvas.width = uw;
++                videoCanvas.height = uh;
++              }
++              const vctx2 = videoCanvas.getContext("2d");
++              if (vctx2) {
++                vctx2.clearRect(0, 0, uw, uh);
++                vctx2.drawImage(v, 0, 0, uw, uh);
++                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, videoCanvas);
++                for (let drain = 0; drain < 16; drain++) {
++                  const glErr = gl.getError();
++                  if (glErr === gl.NO_ERROR) break;
++                  if (glErr === gl.CONTEXT_LOST_WEBGL) break;
+                 }
+-              } catch (e) {
+               }
+-              diag("video upload: 直传失败，改用离屏 canvas 中转");
++            } catch (e) {
+             }
++            diag("video upload: 直传失败，改用离屏 canvas 中转");
+           }
+-          texObj.width = uw;
+-          texObj.height = uh;
+-          texObj.lastUploaded = v.currentTime;
+-          videoTexReportedSize = uw + "x" + uh;
+-          if (texObj.reportedSize !== videoTexReportedSize) {
+-            texObj.reportedSize = videoTexReportedSize;
+-            videoCanvasReported = true;
+-            diag(
+-              "video tex ready " + uw + "x" + uh + " (src " + vw + "x" + vh + ", limit " + limit + ", footprint " + (footprint > 0 ? Math.round(footprint) : "n/a") + ", texScale " + videoTexScale + ", upload " + videoUploadCostMs.toFixed(1) + "ms)"
+-            );
+-          }
+-        } catch (e) {
+-          if (!videoCanvasReported) {
+-            videoCanvasReported = true;
+-            diag("video upload FAIL: " + (e && e.message || e));
+-          }
+-          console.warn("[we-scene] 视频帧上传失败:", e && e.message, "readyState=", v.readyState, "cur=", v.currentTime);
+         }
++        texObj.width = uw;
++        texObj.height = uh;
++        texObj.lastUploaded = v.currentTime;
++        videoTexReportedSize = uw + "x" + uh;
++        if (texObj.reportedSize !== videoTexReportedSize) {
++          texObj.reportedSize = videoTexReportedSize;
++          videoCanvasReported = true;
++          diag(
++            "video tex ready " + uw + "x" + uh + " (src " + vw + "x" + vh + ", limit " + limit + ", footprint " + (footprint > 0 ? Math.round(footprint) : "n/a") + ", texScale " + videoTexScale + ", upload " + videoUploadCostMs.toFixed(1) + "ms)"
++          );
++        }
++      } catch (e) {
++        if (!videoCanvasReported) {
++          videoCanvasReported = true;
++          diag("video upload FAIL: " + (e && e.message || e));
++        }
++        console.warn("[we-scene] 视频帧上传失败:", e && e.message, "readyState=", v.readyState, "cur=", v.currentTime);
+       }
+     }
++  }
++  async function renderLayer(layer, textures2, cam, viewProj, width, height, time) {
++    if (layer.isLight && !layer.image && !layer.isText && !layer.particle && !layer.isComponent) return;
++    const isPuppet = !!(layer.puppet && puppetDrawFn);
++    const texObj = !layer.solid && layer.textureName ? textures2.get(layer.textureName) : null;
++    if (texObj && texObj.video) uploadVideoFrame(texObj, layer, width, height);
+     if (texObj && texObj.animatedImage) {
+       const img = texObj.animatedImage;
+       if (img.complete && img.naturalWidth > 0) {
+@@ -14013,6 +14016,10 @@ function createRenderer(canvas, opts = {}) {
+           }
+           entry = paintDefault || { glTex: whiteTex, width: 1, height: 1, tex: whiteTex };
+         }
++        if (entry.video && !entry.fbo) {
++          gl.activeTexture(gl.TEXTURE0 + ti);
++          uploadVideoFrame(entry, layer, width, height);
++        }
+         const t = entry.fbo ? entry : { tex: entry.glTex || whiteTex, width: entry.width || 1, height: entry.height || 1 };
+         gl.activeTexture(gl.TEXTURE0 + ti);
+         gl.bindTexture(gl.TEXTURE_2D, t.tex);
+@@ -29992,13 +29999,26 @@ function mountScene(rt, cfg) {
+         `resources R=${resScaleBase}${resScaleNormal !== resScaleBase ? ` (normal R=${resScaleNormal})` : ""} tex=${mem.texCount} gpu≈${(mem.gpuUploaded / 1e6).toFixed(1)}MB cpuDecoded=${(mem.cpuDecoded / 1e6).toFixed(1)}MB released=${(mem.cpuReleased / 1e6).toFixed(1)}MB scaled=${mem.scaled.length}` + (mem.scaled.length ? ` 例: ${mem.scaled.slice(0, 3).map((x) => `${x.name}(${x.how} ${x.from}→${x.to})`).join(" ")}` : "") + (mem.framesScaled.length ? ` 帧图集缩放: ${mem.framesScaled.slice(0, 3).join(" ")}` : ""),
+         "info"
+       );
+-      for (const [texName, texEntry] of textures2) {
+-        if (!texEntry?.videoCtl) continue;
+-        const usedVisible = scene.layers.some(
+-          (l) => l.textureName === texName && l.visible && !l.destroyed
+-        );
+-        if (usedVisible && !rt.paused) texEntry.videoCtl.play();
+-      }
++      // 视频贴图在第一次真正用到时起播：可见图层的自身画面，或可见效果通道引用的输入（如 Blend 的混合贴图）。
++      // 载入时和运行中（用户属性、脚本把图层或效果切成可见）都检查；从未用到的隐藏层视频不起播，免去解码开销。
++      // 起播之后的播放与暂停交给场景暂停、脚本和逐帧定位。
++      const pendingVideos = /* @__PURE__ */ new Map();
++      for (const [texName, texEntry] of textures2) if (texEntry?.videoCtl) pendingVideos.set(texName, texEntry);
++      const passUses = (p, texName) => !!p && Array.isArray(p.textures) && p.textures.includes(texName);
++      const videoInUse = (texName) => scene.layers.some(
++        (l) => l.visible && !l.destroyed && (l.textureName === texName || (l.effects || []).some(
++          (e) => e.visible && ((e.passes || []).some((p) => passUses(p, texName)) || (e.materialPasses || []).some((p) => passUses(p, texName)))
++        ))
++      );
++      const startVideosInUse = () => {
++        if (rt.paused || !pendingVideos.size) return;
++        for (const [texName, texEntry] of pendingVideos) {
++          if (!videoInUse(texName)) continue;
++          pendingVideos.delete(texName);
++          texEntry.videoCtl.play();
++        }
++      };
++      startVideosInUse();
+       const particleSystems = [];
+       const particleDirty = [];
+       const particleSystemsByLayer = /* @__PURE__ */ new Map();
+@@ -32314,6 +32334,7 @@ function mountScene(rt, cfg) {
+         if (disposed || rt.paused && !forced) return;
+         tickOcclusion(rt, now);
+         if (disposed || !forced && (rt.paused || rt.occlusion?.band === "pause")) return;
++        if (!forced) startVideosInUse();
+         const occlBand = rt.occlusion?.band;
+         const baseFps = rt.cfg.sceneFps || 60;
+         const fps = occlusionFpsCap(occlBand, occlusionCfgOf(rt), baseFps);

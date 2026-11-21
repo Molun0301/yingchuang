@@ -194,7 +194,7 @@ def test_luts_reach_baked_and_native_outputs_and_hide_adjustments(time_request, 
 
 def test_curve_and_adjust_data_change_cache_identity(time_request, tmp_path):
     request = curve_request(time_request, tmp_path)
-    args = (request["theme"], request["draft"], None)
+    args = (request["theme"], request["project"], None)
     variants = request["timeVariants"]
     original = bridge.graphic_key(*args, variants)
     for field in ("origin", "scale", "angles", "alpha", "adjust", "baked"):

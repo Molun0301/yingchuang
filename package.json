@@ -1,6 +1,6 @@
 {
   "name": "yingchuang",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "映窗 · 背屏壁纸工作室",
   "author": "映窗",
   "license": "MIT",
@@ -12,6 +12,7 @@
     "build": "tsc -b && vite build",
     "start": "electron .",
     "test": "node --test tests/*.test.cjs",
+    "postinstall": "patch-package",
     "package:linux": "npm run build && electron-builder --linux AppImage --publish never",
     "package:win": "npm run build && electron-builder --win zip --publish never -c.compression=maximum"
   },
@@ -28,6 +29,7 @@
     "electron": "45.2.3",
     "electron-builder": "26.18.0",
     "lucide-react": "^0.577.0",
+    "patch-package": "8.0.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "typescript": "^5.9.3",

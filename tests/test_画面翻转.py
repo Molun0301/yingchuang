@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 
 import imageio_ffmpeg
 from PIL import Image
@@ -87,21 +88,34 @@ def export_request(tmp_path):
     (tmp_path/'scratch').mkdir()
     source=tmp_path/'原图.png';image=Image.new('RGB',(64,32),'red');image.paste('blue',(32,0,64,32));image.save(source)
     return {'operation':'export','theme':{'type':'image','source':str(source),'title':'镜像'},
-            'draft':{'layout':{'flip':True,'scale':1,'x':.2,'y':.5,'clock':{'enabled':False,'rows':{}}}},
+            'project':{'version':2,'framing':{'flip':True,'scale':1,'x':.2,'y':.5},'showWidgets':False,'widgets':[],
+                       'motion':{'fps':30},'properties':{},'layers':{},'export':{'quality':'standard'}},
             'device':{'name':'测试机型','width':64,'height':32},'cacheRoot':str(tmp_path/'cache'),
-            'scratchRoot':str(tmp_path/'scratch'),'outputDirectory':str(tmp_path/'output')}
+            'scratchRoot':str(tmp_path/'scratch'),'exportStagingRoot':str(tmp_path),
+            'buildDirectory':str(tmp_path/'builds'/'成品'),'outputFile':str(tmp_path/'导出'/'壁纸.mrc')}
 
 
 def test_export_mirrors_stage_and_keeps_cached_source(tmp_path):
     request=export_request(tmp_path)
     cached=bridge.prepare(request)
+    output=Path(request['outputFile']);output.parent.mkdir();output.write_bytes(b'old')
     result=bridge.export(request);folder=Path(result['folder'])
+    assert result=={'path':str(output),'folder':request['buildDirectory'],'size':output.stat().st_size,
+                    'notes':0,'preview':str(folder/'preview.jpg')}
+    assert list(output.parent.iterdir())==[output]
+    assert set(p.name for p in folder.iterdir())=={'assets','manifest.xml','metadata.mrm','description.xml',
+        'var_config.xml','配置.json','转换报告.json','交互预览.html','preview.jpg','画面预览.jpg'}
+    assert json.loads((Path(request['scratchRoot'])/'job-result.json').read_text())==result
+    with zipfile.ZipFile(output) as archive:
+        assert archive.read('manifest.xml')==(folder/'manifest.xml').read_bytes()
     with Image.open(folder/cached['layers'][0]['asset']) as image:
         assert image.getpixel((8,16))[2]>200 and image.getpixel((56,16))[0]>200
     with Image.open(Path(cached['assetRoot'])/cached['layers'][0]['asset']) as image:
         assert image.getpixel((8,16))[0]>200 and image.getpixel((56,16))[2]>200
     report=json.loads((folder/'转换报告.json').read_text(encoding='utf-8'))
     assert report['配置']['水平翻转'] is True
+    assert report['排版']=={key:request['project'][key] for key in ('framing','showWidgets','widgets')}
+    assert report['壁纸设置']==request['project']['properties']
 
 
 def test_recorded_export_does_not_mirror_twice(tmp_path):

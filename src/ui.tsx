@@ -5,6 +5,8 @@ import { Layers, Film, Globe, AppWindow, Image as ImageIcon } from 'lucide-react
 import { Glass } from './appearance';
 
 export type ToastKind = 'success' | 'error' | 'info';
+/** 提示条上的操作按钮，例如“查看”“在 Steam 打开原壁纸” */
+export type ToastAction = { label: string; run: () => void };
 export const typeNames: Record<string, string> = { scene: '场景', video: '视频', web: '网页', image: '图片', application: '应用' };
 const typeIcons: Record<string, typeof Layers> = { scene: Layers, video: Film, web: Globe, image: ImageIcon, application: AppWindow };
 export function TypeIcon({ type, size = 12 }: { type: string; size?: number }) { const Icon = typeIcons[type] || Layers; return <Icon size={size} strokeWidth={2}/>; }
@@ -62,10 +64,11 @@ export function useNavIndicator(active: string) {
 
 /**
  * 以当前壁纸封面作为模糊环境光，给玻璃提供可折射的内容；新图加载完成后才淡入。
- * 只取封面第一帧的缩略图：很多封面是动图，直接作背景会让整片界面底色不停变化。
+ * 只取封面第一帧：很多封面是动图，直接作背景会让整片界面底色不停变化。
+ * 封面多是 192～1024 像素的小图，铺满窗口要放大好几倍：按放大倍数给足模糊，液态玻璃下也不出现马赛克。
  */
 export function Ambient({ image, enabled }: { image: string; enabled: boolean }) {
-  const [layers, setLayers] = useState<{ src: string; key: number; image: string }[]>([]);
+  const [layers, setLayers] = useState<{ src: string; key: number; image: string; blur: number }[]>([]);
   const serial = useRef(0);
   useEffect(() => {
     if (!enabled || !image) return;
@@ -73,16 +76,17 @@ export function Ambient({ image, enabled }: { image: string; enabled: boolean })
     probe.crossOrigin = 'anonymous';
     probe.onload = () => {
       if (key !== serial.current) return;
-      const canvas = document.createElement('canvas'), ratio = 96 / Math.max(probe.naturalWidth, probe.naturalHeight, 1);
+      const longest = Math.max(probe.naturalWidth, probe.naturalHeight, 1), ratio = Math.min(1, 480 / longest);
+      const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(probe.naturalWidth * ratio)); canvas.height = Math.max(1, Math.round(probe.naturalHeight * ratio));
       canvas.getContext('2d')!.drawImage(probe, 0, 0, canvas.width, canvas.height);
-      const still = canvas.toDataURL('image/png');
-      setLayers(old => [...old.filter(layer => layer.image !== image).slice(-1), { src: still, key, image }]);
+      const blur = Math.round(Math.min(28, Math.max(3, Math.max(innerWidth, innerHeight) * 1.24 / Math.max(canvas.width, canvas.height) * .9)));
+      setLayers(old => [...old.filter(layer => layer.image !== image).slice(-1), { src: canvas.toDataURL('image/jpeg', .86), key, image, blur }]);
     };
     probe.src = image;
   }, [image, enabled]);
   return <div className={`ambient ${enabled ? '' : 'off'}`} aria-hidden="true">
-    {enabled && layers.map(layer => <div key={layer.key} className="ambient-layer" style={{ backgroundImage: `url("${layer.src}")` }}/>)}
+    {enabled && layers.map(layer => <div key={layer.key} className="ambient-layer" style={{ backgroundImage: `url("${layer.src}")`, '--ambient-blur': `${layer.blur}px` } as React.CSSProperties}/>)}
     <div className="ambient-wash"/>
     <div className="ambient-grain"/>
   </div>;

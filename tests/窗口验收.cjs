@@ -8,7 +8,8 @@ const {Store}=require('../desktop/store.cjs');
 (async()=>{
   const root=path.resolve(__dirname,'..'),output=path.join(root,'test-results/窗口验收');
   fs.mkdirSync(output,{recursive:true});
-  const data=path.join(output,'数据'),store=new Store(data);
+  // 每次从空数据目录开始，避免上次运行留下的设置（如已读版本）影响界面。
+  const data=path.join(output,'数据');fs.rmSync(data,{recursive:true,force:true});const store=new Store(data);
   store.data.settings.roots=[path.join(root,'test-results/窗口样例')];store.save();
   const packaged=process.env.YINGCHUANG_PACKAGED_APP;
   const app=await electron.launch({...(packaged?{executablePath:path.resolve(packaged)}:{}),args:[...(packaged?[]:[root]),'--force-device-scale-factor=1.5'],env:{...process.env,YINGCHUANG_DATA_DIR:data,
@@ -18,16 +19,15 @@ const {Store}=require('../desktop/store.cjs');
     const page=await app.firstWindow();page.on('pageerror',error=>errors.push(error.message));
     await page.getByPlaceholder('搜索壁纸').fill('窗口回归样例');
     await page.locator('.card-picture').click();
-    // 默认图层模式预览不依赖 WebGL2；录制模式另由导出流程验证。
-    await page.locator('canvas[data-scene-ready=true]').waitFor();
+        await page.locator('canvas[data-scene-ready=true]').waitFor();
     await page.locator('.inspector-tabs').getByRole('tab',{name:'组件',exact:true}).click();
     await page.getByRole('combobox',{name:'时间格式'}).click();await page.getByRole('option',{name:'12 小时',exact:true}).click();
     assert.match(await page.getByRole('combobox',{name:'时间格式'}).innerText(),/12 小时/);
-    await page.locator('.inspector-tabs').getByRole('tab',{name:'主题',exact:true}).click();
+    await page.locator('.inspector-tabs').getByRole('tab',{name:'壁纸设置',exact:true}).click();
     await page.getByRole('combobox',{name:'样例下拉列表'}).click();
     await page.getByRole('textbox',{name:'搜索样例下拉列表'}).fill('24');await page.getByRole('option',{name:'选项 24',exact:true}).click();
     assert.match(await page.getByRole('combobox',{name:'样例下拉列表'}).innerText(),/24/);
-    await page.locator('.inspector-tabs').getByRole('tab',{name:'排版',exact:true}).click();
+    await page.locator('.inspector-tabs').getByRole('tab',{name:'画面',exact:true}).click();
     const input=page.getByRole('spinbutton',{name:'缩放数值',exact:true}),before=Number(await input.inputValue());
     await page.locator('canvas').hover();await page.mouse.wheel(0,-160);assert(Number(await input.inputValue())>before);
     for(const [width,height] of [[1280,800],[960,640],[850,560]]){

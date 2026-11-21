@@ -52,10 +52,11 @@ def time_request(tmp_path):
     scratch=tmp_path/'工作';scratch.mkdir()
     return {'operation':'export','theme':{'type':'scene','title':'时段样例','source':str(source/'scene.json'),
                                         'resolvedScene':current,'engineRoots':[]},
-            'draft':{'layout':{'scale':1,'x':.5,'y':.5,'clock':{'enabled':False,'rows':{}}},
+            'project':{'version':2,'framing':{'scale':1,'x':.5,'y':.5},'showWidgets':False,'widgets':[],
                      'motion':{'fps':30},'properties':{},'layers':{}},
             'device':{'name':'测试背屏','width':320,'height':240},'cacheRoot':str(tmp_path/'缓存'),
-            'scratchRoot':str(scratch),'outputDirectory':str(tmp_path/'成品'),
+            'scratchRoot':str(scratch),'exportStagingRoot':str(tmp_path),
+            'buildDirectory':str(tmp_path/'builds'/'成品'),'outputFile':str(tmp_path/'导出'/'壁纸.mrc'),
             'timeVariants':{'scenes':[first,second],'objects':{
                 '1':[{'scene':0,'alpha':inverse(SWITCH),'baked':None},{'scene':1,'alpha':deepcopy(SWITCH),'baked':None}],
                 '2':[{'scene':0,'alpha':deepcopy(FADE),'baked':None},{'scene':1,'alpha':inverse(FADE),'baked':None}]}}}
@@ -194,23 +195,23 @@ def test_each_variant_uses_its_baked_frames_and_shared_budget(time_request,tmp_p
 
 
 def test_cache_key_tracks_scenes_weights_and_variant_baking(time_request,tmp_path):
-    theme,draft=time_request['theme'],time_request['draft']
+    theme,project=time_request['theme'],time_request['project']
     variants=time_request['timeVariants']
-    original=bridge.graphic_key(theme,draft,None,variants)
-    assert original!=bridge.graphic_key(theme,draft)
+    original=bridge.graphic_key(theme,project,None,variants)
+    assert original!=bridge.graphic_key(theme,project)
     for change in ('scene','alpha','selection','order'):
         changed=deepcopy(variants)
         if change=='scene':changed['scenes'][1]['objects'][1]['text']='Evening'
         elif change=='alpha':changed['objects']['1'][1]['alpha'][1][0]=350
         elif change=='selection':changed['objects']['2'][1]['scene']=0
         else:changed['objects']['2'].reverse()
-        assert bridge.graphic_key(theme,draft,None,changed)!=original
+        assert bridge.graphic_key(theme,project,None,changed)!=original
     variants['objects']['1'][1]['baked']=baked_frames(tmp_path,'缓存状态')
-    baked_key=bridge.graphic_key(theme,draft,None,variants)
+    baked_key=bridge.graphic_key(theme,project,None,variants)
     assert baked_key!=original
     file=Path(variants['objects']['1'][1]['baked']['dir'])/'frames.rgba.gz'
     file.write_bytes(file.read_bytes()+b'\0')
-    assert bridge.graphic_key(theme,draft,None,variants)!=baked_key
+    assert bridge.graphic_key(theme,project,None,variants)!=baked_key
 
 
 @pytest.mark.parametrize('seconds',[False,True])

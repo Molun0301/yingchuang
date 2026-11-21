@@ -26,9 +26,50 @@ def font_data():
     return Path(ImageFont.truetype('DejaVuSans.ttf',12).path).read_bytes()
 
 
-def draft_for(*visible):
-    return {'layout':{'scale':1,'x':.5,'y':.5,'clock':{'enabled':True,'language':'en','rows':{
-        key:{'visible':True} for key in visible}}},'appearance':{'fonts':{},'colors':{'time':'#42b5a6'}}}
+def project_for(*visible):
+    widgets=[{'key':key} for key in dict.fromkeys((*clockwork.CORE_KEYS,*visible))]
+    widget_for(widgets,'time')['color']='#42b5a6'
+    return {'version':2,'framing':{'scale':1,'x':.5,'y':.5,'flip':False},'showWidgets':True,'widgets':widgets,
+            'motion':{'fps':30},'properties':{},'layers':{},'export':{'mode':'layers','quality':'standard'}}
+
+
+def widget_for(widgets,key):
+    return next(item for item in widgets if item['key']==key)
+
+
+def test_v2_project_config_and_clock_apply_widget_settings(tmp_path):
+    source=tmp_path/'scene.json'
+    source.write_text(json.dumps({'general':{'orthogonalprojection':{'width':200,'height':100}},
+                                  'objects':[{'id':1,'name':'time','text':'18:24','font':'font.ttf'}]}))
+    font=tmp_path/'font.ttf';font.write_bytes(font_data())
+    scratch=tmp_path/'scratch';scratch.mkdir()
+    project=project_for()
+    project.update(framing={'scale':1.5,'x':.25,'y':.75,'flip':True},
+                   widgets=[{'key':'time','font':str(font),'color':'#abcdef','seconds':True,'hourFormat':'auto',
+                             'x':.7,'size':55,'align':'right','effect':'shadow'},
+                            {'key':'week','language':'zh'},{'key':'text','text':'Hello','label':False}],
+                   properties={'__videoVolume':.5},export={'mode':'layers','quality':'high'})
+    theme={'type':'scene','source':str(source),'scriptResult':{'clockFormats':{'1':'12'}}}
+    request={'project':project,'theme':theme,'cacheRoot':str(tmp_path/'cache'),'scratchRoot':str(scratch)}
+    device={'width':976,'height':596,'name':'测试机型'}
+    config=bridge.config_for(project,device)
+    assert [config[key] for key in ('画面缩放','横向取景','纵向取景','水平翻转')]==[1.5,.25,.75,True]
+    assert config['显示秒'] and config['时制']=='auto' and config['星期语言']=='中文'
+    assert config['时钟颜色']['time']=='#abcdef' and config['导出画质']=='high' and config['视频音量']==.5
+    rows=config['时钟排版']
+    assert set(rows)==set(clockwork.WIDGETS)
+    assert {key for key,row in rows.items() if row['visible']}=={'time','week','text'}
+    assert rows['time']=={'visible':True,'x':.7,'y':clockwork.WIDGETS['time']['y'],'size':55,'align':'right',
+                          'label':True,'language':'zh','effect':'shadow'}
+    assert rows['text']['text']=='Hello' and rows['text']['label'] is False
+    assert bridge.selected_clock_fonts(theme,project)['时间'][1]['字体文件']==str(font)
+    _,clock=bridge.prepare_clock(request,config)
+    time=next(row for row in clock['rows'] if row['key']=='time')
+    assert time['hourFormat']=='12' and len(time['pieces'])==8
+    project['showWidgets']=False
+    config=bridge.config_for(project,device)
+    assert all(not row['visible'] for row in config['时钟排版'].values())
+    assert bridge.prepare_clock(request,config)==(None,None)
 
 
 def test_font_without_digits_keeps_time_with_fallback(tmp_path):
@@ -52,24 +93,24 @@ def test_missing_theme_and_explicit_widget_font_are_warnings(tmp_path):
     (tmp_path/'scene.json').write_text(json.dumps(scene),encoding='utf-8')
     (tmp_path/'project.json').write_text(json.dumps({'type':'scene','file':'scene.json'}),encoding='utf-8')
     theme={'type':'scene','source':str(tmp_path/'scene.json')}
-    detail=bridge.inspect_theme({'theme':theme,'draft':{}})
-    assert detail['hasClock'] is True and '未随主题提供' in detail['fontIssue']
+    detail=bridge.inspect_theme({'theme':theme,'project':{}})
+    assert detail['hasClock'] is True and '未随壁纸提供' in detail['fontIssue']
     assert detail['sourceFonts']=={} and detail['sourceColors']=={}
-    draft=draft_for('lunar','steps','weather')
-    config=bridge.config_for(draft,{'width':976,'height':596,'name':'测试机型'})
+    project=project_for('lunar','steps','weather')
+    config=bridge.config_for(project,{'width':976,'height':596,'name':'测试机型'})
     (tmp_path/'assets').mkdir()
-    clock=clockwork.build_clock(tmp_path,config,bridge.selected_clock_fonts(theme,draft))
+    clock=clockwork.build_clock(tmp_path,config,bridge.selected_clock_fonts(theme,project))
     assert [item['key'] for item in clock['warnings']]==['week','date','time']
     assert {'lunar','steps','weather'}<={row['key'] for row in clock['rows']}
-    draft['appearance']['fonts']['steps']=str(tmp_path/'不存在.ttf')
-    selected=bridge.selected_clock_fonts(theme,draft)
+    widget_for(project['widgets'],'steps')['font']=str(tmp_path/'不存在.ttf')
+    selected=bridge.selected_clock_fonts(theme,project)
     assert selected['时间'][0] is None and selected['steps'][0] is None
     assert selected['steps'][1]['提醒']
     clock=clockwork.build_clock(tmp_path,config,selected)
     assert any(item['key']=='steps' and '无法读取步数字体' in item['message'] for item in clock['warnings'])
     data=font_data();chosen=tmp_path/'选中的字体.ttf';chosen.write_bytes(data)
-    draft['appearance']['fonts']['steps']=str(chosen)
-    assert bridge.selected_clock_fonts(theme,draft)['steps'][0]==data
+    widget_for(project['widgets'],'steps')['font']=str(chosen)
+    assert bridge.selected_clock_fonts(theme,project)['steps'][0]==data
 
 
 def test_fallback_prefers_regular_weight():
@@ -82,12 +123,16 @@ def test_fallback_prefers_regular_weight():
 @pytest.fixture(scope='module',params=['zh','en'])
 def widgets(tmp_path_factory,request):
     stage=tmp_path_factory.mktemp('背屏组件');(stage/'assets').mkdir()
-    draft=draft_for('lunar','steps','distance','temperature','weather','range','air','sunrise','sunset','battery','text')
+    project=project_for('lunar','steps','distance','temperature','weather','range','air','sunrise','sunset','battery','text')
     for key,align in (('steps','left'),('distance','right'),('temperature','center')):
-        draft['layout']['clock']['rows'][key]['align']=align
-    draft['layout']['clock']['rows']['text']['text']='今天也要开心'
-    for row in draft['layout']['clock']['rows'].values():row['language']=request.param
-    config=bridge.config_for(draft,{'width':976,'height':596,'name':'测试机型','safeLeft':.32,
+        widget_for(project['widgets'],key)['align']=align
+    widget_for(project['widgets'],'text')['text']='今天也要开心'
+    for row in project['widgets']:row['language']=request.param
+    widget_for(project['widgets'],'time')['effect']='shadow'
+    widget_for(project['widgets'],'week')['effect']='outline'
+    widget_for(project['widgets'],'distance')['effect']='outline'
+    widget_for(project['widgets'],'weather')['effect']='shadow'
+    config=bridge.config_for(project,{'width':976,'height':596,'name':'测试机型','safeLeft':.32,
                                   'camera':{'x':152,'ys':[151,451],'r':102},'cornerRadius':84})
     selected={role:(font_data(),{'字体文件':'本机字体'}) for role in clockwork.ROLES}
     clock=clockwork.build_clock(stage,config,selected)
@@ -103,11 +148,9 @@ def widgets(tmp_path_factory,request):
 @pytest.mark.parametrize('label',[True,False])
 def test_all_localized_widgets_have_complete_glyphs_and_manifest(tmp_path,monkeypatch,language,label):
     definitions=[spec for spec in clockwork.WIDGETS.values() if spec.get('lang')]
-    draft=draft_for(*(spec['key'] for spec in definitions))
-    # 顶层语言故意与星期行相反，确认逐行设置优先。
-    draft['layout']['clock']['language']='zh' if language=='en' else 'en'
-    for row in draft['layout']['clock']['rows'].values():row.update(language=language,label=label)
-    config=bridge.config_for(draft,{'width':976,'height':596,'name':'测试机型'})
+    project=project_for(*(spec['key'] for spec in definitions))
+    for row in project['widgets']:row.update(language=language,label=label)
+    config=bridge.config_for(project,{'width':976,'height':596,'name':'测试机型'})
     config['组件示例']={'lm':23,'ld':29}
     (tmp_path/'assets').mkdir()
     written,needed={},{}
@@ -262,7 +305,9 @@ def test_manifest_dynamic_images_match_preview_layout(widgets,steps,distance,tem
                 actual.append((file,evaluate(node.get('x'),variables),evaluate(node.get('w'),variables)))
         width,parts=clockwork.row_parts(row,values)
         shift=width/2 if row['align']=='left' else -width/2 if row['align']=='right' else 0
-        assert actual==[(file,x+shift,w) for file,x,w in parts]
+        margin=2*row.get('pad',0)
+        assert actual==[(file,x+shift,w+margin) for file,x,w in parts]
+        assert all(evaluate(node.get('h'),variables)==row['h']+margin for node in group.findall('Image'))
 
 
 def test_export_preview_runs_shared_rows_and_real_camera(widgets):
@@ -273,8 +318,8 @@ def test_export_preview_runs_shared_rows_and_real_camera(widgets):
     harness=r"""
 const fs=require('fs'), vm=require('vm'), code=fs.readFileSync(0,'utf8'), elements={}, draws=[];
 const context={drawImage:(image,x,y,w,h)=>draws.push([image.src,x+w/2,y+h/2,w,h])};
-function element(){return {style:{},children:[],classList:{add(){}},appendChild(child){this.children.push(child)},replaceChildren(){this.children=[]},addEventListener(){},setAttribute(){},getContext(){return context}}}
-const sandbox=vm.createContext({document:{getElementById(id){return elements[id]??=element()},createElement:element,documentElement:{dataset:{}}},Image:class{set src(v){this.file=v;this.onload()}get src(){return this.file}},requestAnimationFrame(){}});
+function element(){return {style:{setProperty(){}},children:[],classList:{add(){}},appendChild(child){this.children.push(child)},replaceChildren(){this.children=[]},addEventListener(){},setAttribute(){},getContext(){return context}}}
+const sandbox=vm.createContext({document:{getElementById(id){return elements[id]??=element()},createElement:element,documentElement:{dataset:{}},body:element()},location:{search:''},URLSearchParams,Image:class{set src(v){this.file=v;this.onload()}get src(){return this.file}},requestAnimationFrame(){}});
 vm.runInContext(code,sandbox);
 setImmediate(()=>{vm.runInContext('drawClock(new Date(2026,10,13,10,8,12))',sandbox);console.log(JSON.stringify({draws,camera:elements.camera.children.map(x=>x.style),radius:elements.screen.style.borderRadius}))});
 """
@@ -285,7 +330,8 @@ setImmediate(()=>{vm.runInContext('drawClock(new Date(2026,10,13,10,8,12))',sand
     for row in clock['rows']:
         width,parts=clockwork.row_parts(row,values)
         shift=width/2 if row['align']=='left' else -width/2 if row['align']=='right' else 0
-        expected.extend((file,row['nx']*976+x+shift,row['ny']*596,w,row['h']) for file,x,w in parts)
+        margin=2*row.get('pad',0)
+        expected.extend((file,row['nx']*976+x+shift,row['ny']*596,w+margin,row['h']+margin) for file,x,w in parts)
     assert len(result['draws'])==len(expected)
     for actual,(file,*geometry) in zip(result['draws'],expected):
         assert actual[0]==file and actual[1:]==pytest.approx(geometry)
@@ -299,7 +345,7 @@ setImmediate(()=>{vm.runInContext('drawClock(new Date(2026,10,13,10,8,12))',sand
 def test_samples_do_not_change_glyph_cache_and_reach_preview(tmp_path):
     source=tmp_path/'原图.png';Image.new('RGB',(48,32),'#123456').save(source)
     (tmp_path/'scratch').mkdir()
-    request={'theme':{'type':'image','source':str(source),'title':'示例'},'draft':draft_for('lunar','steps'),
+    request={'theme':{'type':'image','source':str(source),'title':'示例'},'project':project_for('lunar','steps'),
              'device':{'width':976,'height':596,'name':'测试机型'},'cacheRoot':str(tmp_path/'cache'),
              'scratchRoot':str(tmp_path/'scratch'),'widgetSamples':{'lm':13,'ld':28}}
     first=bridge.prepare(request)
@@ -319,3 +365,35 @@ def test_samples_do_not_change_glyph_cache_and_reach_preview(tmp_path):
     with patch.object(clockwork,'row_parts',record):
         clockwork.draw_clock(canvas,root,clock,488,298,1,second['config']['组件示例'])
     assert seen and all(value['lm']==1 and value['ld']==2 for value in seen)
+
+
+@pytest.mark.parametrize('effect,color,contrast,max_opacity',[
+    ('shadow','#ffffff',(0,0,0),115),('outline','#000000',(255,255,255),255),
+])
+def test_glyph_effect_expands_bitmap_and_static_preview(tmp_path,effect,color,contrast,max_opacity):
+    (tmp_path/'scratch').mkdir()
+    font=tmp_path/'font.ttf';font.write_bytes(font_data())
+    project=project_for('text')
+    widget=widget_for(project['widgets'],'text')
+    widget.update(text='HI',font=str(font),color=color,x=.5,y=.5,size=80)
+    request={'theme':{'type':'image'},'project':project,'cacheRoot':str(tmp_path/'cache'),'scratchRoot':str(tmp_path/'scratch')}
+    device={'width':976,'height':596,'name':'测试机型'}
+    plain_root,plain=bridge.prepare_clock(request,bridge.config_for(project,device))
+    widget['effect']=effect
+    root,clock=bridge.prepare_clock(request,bridge.config_for(project,device))
+    assert root!=plain_root
+    row=next(item for item in clock['rows'] if item['key']=='text')
+    pad=row['pad']
+    assert pad>0 and {key:value for key,value in row.items() if key!='pad'}==next(
+        item for item in plain['rows'] if item['key']=='text')
+    file=row['segments'][0]['asset']
+    with Image.open(root/file) as image, Image.open(plain_root/file) as base:
+        assert image.size==tuple(edge+2*pad*clockwork.RASTER_SCALE for edge in base.size)
+        shades=[alpha for r,g,b,alpha in image.getdata() if (r,g,b)==contrast and alpha]
+        assert 0<max(shades)<=max_opacity
+        rendered=image.resize((row['w']+2*pad,row['h']+2*pad),Image.Resampling.LANCZOS)
+    canvas=Image.new('RGBA',(976,596))
+    clockwork.draw_clock(canvas,root,{**clock,'rows':[row]},488,298,1)
+    expected=Image.new('RGBA',canvas.size)
+    expected.alpha_composite(rendered,(round(488-rendered.width/2),round(298-rendered.height/2)))
+    assert canvas.tobytes()==expected.tobytes()

@@ -1,9 +1,9 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {ConversionQueue}=require('../desktop/queue.cjs');
-const {defaultDraft}=require('../desktop/model.cjs');
+const {model}=require('../desktop/projects.cjs');
 
-const item=id=>({theme:{id,title:id},draft:defaultDraft()});
+const item=id=>({theme:{id,title:id},project:model.create(),device:{id:'xiaomi-18-pro-max'}});
 const settled=queue=>new Promise(resolve=>{const check=items=>{if(items.every(x=>!['waiting','running'].includes(x.status))){queue.off('change',check);resolve(items);}};queue.on('change',check);check(queue.snapshot());});
 
 test('并行导出：同时运行的项数等于并发数，前面的完成后补上等待项',async()=>{

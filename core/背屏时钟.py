@@ -1,4 +1,4 @@
-"""从主题的实际字体引用生成无描边的动态时钟与背屏组件字形。"""
+"""从壁纸的字体引用生成动态时钟与背屏组件字形。"""
 
 from datetime import datetime
 from functools import lru_cache
@@ -12,7 +12,7 @@ import re
 import sys
 
 from fontTools.ttLib import TTFont, TTLibError
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 
 ROLES = ("星期", "日期", "时间")
@@ -133,7 +133,7 @@ def select_fonts(package, objects, worlds, properties, overrides=None):
         candidates = role_fonts[role]
         override = overrides.get(role, overrides.get("全部"))
         if override is not None:
-            record = {"字体文件": override.name, "选取规则": "用户明确指定", "主题声明": sorted(candidates),
+            record = {"字体文件": override.name, "选取规则": "用户明确指定", "壁纸声明": sorted(candidates),
                       "源图层": [layer for group in candidates.values() for layer in group]}
             try:
                 selected[role] = (read_font_data(override), record)
@@ -146,7 +146,7 @@ def select_fonts(package, objects, worlds, properties, overrides=None):
             path = sorted(candidates, key=lambda name: (-len(candidates[name]), name))[0]
             source_layers = candidates[path]
             reason = "该行图层最多的源字体"
-            notice = f"原主题的{role}用了多个字体，已使用 {Path(path).stem}"
+            notice = f"原壁纸的{role}用了多个字体，已使用 {Path(path).stem}"
         elif candidates:
             path = next(iter(candidates))
             source_layers = candidates[path]
@@ -159,12 +159,12 @@ def select_fonts(package, objects, worlds, properties, overrides=None):
                 continue
             path = next(iter(fallback))
             source_layers = all_fonts[path]
-            reason = "沿用唯一源时钟字体" if clock_fonts else "沿用主题可见文字的唯一字体"
+            reason = "沿用唯一源时钟字体" if clock_fonts else "沿用壁纸可见文字的唯一字体"
         record = {"字体文件": path, "选取规则": reason, "源图层": source_layers}
         if notice:
             record["提醒"] = notice
         if package is None or not package.has(path):
-            selected[role] = (None, {**record, "提醒": f"主题声明的{role}字体 {Path(path).name} 未随主题提供"})
+            selected[role] = (None, {**record, "提醒": f"壁纸声明的{role}字体 {Path(path).name} 未随壁纸提供"})
             continue
         if path not in cache:
             try:cache[path] = package.read(path)
@@ -275,40 +275,62 @@ def ink_width(font, text):
     return max(1, math.ceil((right-left) / RASTER_SCALE))
 
 
-def write_glyph(stage, file, text, font, width, height, bounds, color):
-    image = Image.new("RGBA", (width * RASTER_SCALE, height * RASTER_SCALE))
-    left, _, right, _ = font.getbbox(text, anchor="ls")
+def glyph_style(font, color, effect):
+    stroke = max(RASTER_SCALE, round(font.size*.05)) if effect=="outline" else 0
+    offset, blur = (round(font.size*.04), font.size*.08) if effect=="shadow" else (0, 0)
+    pad = math.ceil(max(stroke, offset+3*blur)/RASTER_SCALE)
+    r,g,b = ImageColor.getrgb(color)
+    contrast = "black" if .2126*r+.7152*g+.0722*b >= 128 else "white"
+    return pad, stroke, offset, blur, contrast
+
+
+def save_glyph(stage, file, text, font, width, height, bounds, color, style, x):
+    pad, stroke, offset, blur, contrast = style
+    image = Image.new("RGBA", ((width+2*pad)*RASTER_SCALE, (height+2*pad)*RASTER_SCALE))
     top, bottom = bounds
-    x = (image.width - right + left) / 2 - left
+    x += pad*RASTER_SCALE
     baseline = (image.height - bottom + top) / 2 - top
-    ImageDraw.Draw(image).text((x, baseline), text, anchor="ls", font=font, fill=color)
+    if blur:
+        shadow = Image.new("L", image.size)
+        ImageDraw.Draw(shadow).text((x, baseline+offset), text, anchor="ls", font=font, fill=255)
+        shadow = shadow.filter(ImageFilter.GaussianBlur(blur)).point(lambda value:round(value*.45))
+        image = Image.new("RGBA", image.size, contrast)
+        image.putalpha(shadow)
+        ink = Image.new("RGBA", image.size)
+    else:
+        ink = image
+    ImageDraw.Draw(ink).text((x, baseline), text, anchor="ls", font=font, fill=color,
+                            stroke_width=stroke, stroke_fill=contrast)
+    if blur:image.alpha_composite(ink)
     image.save(stage / file, compress_level=1)
 
 
-def write_text(stage, file, text, font, height, bounds, color):
+def write_glyph(stage, file, text, font, width, height, bounds, color, style):
+    left, _, right, _ = font.getbbox(text, anchor="ls")
+    x = (width*RASTER_SCALE - right + left) / 2 - left
+    save_glyph(stage, file, text, font, width, height, bounds, color, style, x)
+
+
+def write_text(stage, file, text, font, height, bounds, color, style):
     """按字符前进宽度生成文字图片，保留前后空格形成的间距；返回输出宽度。"""
     left, _, right, _ = font.getbbox(text, anchor="ls")
     start, end = min(0, left), max(font.getlength(text), right)
     width = max(1, math.ceil((end - start) / RASTER_SCALE) + 2)
-    image = Image.new("RGBA", (width * RASTER_SCALE, height * RASTER_SCALE))
-    top, bottom = bounds
-    baseline = (image.height - bottom + top) / 2 - top
-    ImageDraw.Draw(image).text((RASTER_SCALE - start, baseline), text, anchor="ls", font=font, fill=color)
-    image.save(stage / file, compress_level=1)
+    save_glyph(stage, file, text, font, width, height, bounds, color, style, RASTER_SCALE-start)
     return width
 
 
-def number_row(stage, font, key, fields, punctuation, color):
+def number_row(stage, font, key, fields, punctuation, color, style):
     digits = "0123456789"
     bounds = ink_bounds(font, digits)
     height = math.ceil((bounds[1]-bounds[0]) / RASTER_SCALE)
     width = max(ink_width(font, digit) for digit in digits) + 2
     number_files = [f"assets/clock_{key}_num_{i}.png" for i in range(10)]
     for digit, file in zip(digits, number_files):
-        write_glyph(stage, file, digit, font, width, height, bounds, color)
+        write_glyph(stage, file, digit, font, width, height, bounds, color, style)
     mark_width = max(3, ink_width(font, punctuation) + 3)
     mark_file = f"assets/clock_{key}_mark.png"
-    write_glyph(stage, mark_file, punctuation, font, mark_width, height, bounds, color)
+    write_glyph(stage, mark_file, punctuation, font, mark_width, height, bounds, color, style)
     total = sum(mark_width if field == punctuation else width for field in fields)
     pieces = []
     edge = -total / 2
@@ -361,7 +383,7 @@ def token_glyphs(tokens, language="zh"):
     return "".join(dict.fromkeys(text))
 
 
-def seq_row(stage, font, key, tokens, color, language="zh"):
+def seq_row(stage, font, key, tokens, color, style, language="zh"):
     """组件行：固定文字、可变位数数字与选项文字依次排列，背屏端按实际数值计算位置。"""
     numbers = [token for token in tokens if token[0] == "n"]
     probe = [token[1] for token in tokens if token[0] == "s" and token[1].strip()]
@@ -379,25 +401,25 @@ def seq_row(stage, font, key, tokens, color, language="zh"):
         row["digits"] = [f"assets/w_{key}_num_{i}.png" for i in range(10)]
         row["digitW"] = width
         for digit, file in zip("0123456789", row["digits"]):
-            write_glyph(stage, file, digit, font, width, height, bounds, color)
+            write_glyph(stage, file, digit, font, width, height, bounds, color, style)
         assets += row["digits"]
         for mark, name, wanted in ((".", "dot", any(token[2] for token in numbers)),
                                    ("-", "minus", any(FIELDS[token[1]].get("neg") for token in numbers))):
             if wanted:
                 file = f"assets/w_{key}_{name}.png"
                 mark_width = max(3, ink_width(font, mark) + 3)
-                write_glyph(stage, file, mark, font, mark_width, height, bounds, color)
+                write_glyph(stage, file, mark, font, mark_width, height, bounds, color, style)
                 row[name] = {"asset": file, "w": mark_width}
                 assets.append(file)
     for index, token in enumerate(tokens):
         if token[0] == "s":
             file = f"assets/w_{key}_s{index}.png"
-            row["segments"].append({"t": "s", "asset": file, "w": write_text(stage, file, token[1], font, height, bounds, color)})
+            row["segments"].append({"t": "s", "asset": file, "w": write_text(stage, file, token[1], font, height, bounds, color, style)})
             assets.append(file)
         elif token[0] == "c":
             choices = field_choices(token[1], language)
             files = [f"assets/w_{key}_c{index}_{i}.png" for i in range(len(choices))]
-            widths = [write_text(stage, file, text, font, height, bounds, color)
+            widths = [write_text(stage, file, text, font, height, bounds, color, style)
                       for file, text in zip(files, choices)]
             row["segments"].append({"t": "c", "f": token[1], "src": f"assets/w_{key}_c{index}.png", "assets": files, "ws": widths})
             assets += files
@@ -463,6 +485,7 @@ def build_clock(stage, config, selected):
             warnings.append({"key": key, "message": notice})
         if font is None:
             continue
+        style = glyph_style(font, color, custom.get("effect", "none"))
         if key == "time":
             time_data, time_index = used, font.index
         name = next((role for role, value in ROLE_KEYS.items() if value == key), label)
@@ -474,21 +497,22 @@ def build_clock(stage, config, selected):
             height = math.ceil((bounds[1]-bounds[0]) / RASTER_SCALE)
             files = [f"assets/clock_week_{i}.png" for i in range(7)]
             for word, file in zip(words, files):
-                write_glyph(stage, file, word, font, width, height, bounds, color)
+                write_glyph(stage, file, word, font, width, height, bounds, color, style)
             row = {"key": "week", "w": width, "h": height, "weekdays": files}
             assets += files
         elif key == "date":
-            row = number_row(stage, font, "date", ["Y3","Y2","Y1","Y0",".","M1","M0",".","D1","D0"], ".", color)
+            row = number_row(stage, font, "date", ["Y3","Y2","Y1","Y0",".","M1","M0",".","D1","D0"], ".", color, style)
         elif key == "time":
             fields = ["h1","h0",":","m1","m0"] + ([":","s1","s0"] if config["显示秒"] else [])
-            row = number_row(stage, font, "time", fields, ":", color)
+            row = number_row(stage, font, "time", fields, ":", color, style)
             row["hourFormat"] = config.get("时制", "24")
         else:
-            row, files = seq_row(stage, font, key, tokens, color, language)
+            row, files = seq_row(stage, font, key, tokens, color, style, language)
             assets += files
         if key in ("date", "time"):
             assets += row["digits"] + [part["asset"] for part in row["pieces"] if "asset" in part]
         row["size"] = size
+        if style[0]:row["pad"] = style[0]
         row["language"] = language
         rows.append(row)
     # 三行时钟的默认竖向排布，仅在没有逐行排版时使用。
@@ -583,5 +607,6 @@ def draw_clock(canvas, stage, clock, center_x, center_y, unit, samples=None):
         y = row["ny"]*canvas.height if "ny" in row else center_y + row["y"]*unit
         if row.get("align") == "left": cx += width*unit/2
         elif row.get("align") == "right": cx -= width*unit/2
+        margin = 2*row.get("pad", 0)
         for file, x, w in parts:
-            paint(file, cx + x*unit, y, w, row["h"])
+            paint(file, cx + x*unit, y, w+margin, row["h"]+margin)

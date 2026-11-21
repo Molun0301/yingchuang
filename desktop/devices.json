@@ -5,19 +5,19 @@
     "series": "小米 17 系列",
     "width": 904,
     "height": 572,
-    "safeLeft": 0.324,
+    "safeLeft": 0.327,
     "source": "https://antutu.com/doc/135320",
     "product": "https://www.mi.com/prod/xiaomi-17-pro",
     "camera": {
-      "x": 160,
+      "x": 146,
       "ys": [
-        142,
-        430
+        146,
+        423
       ],
-      "r": 98
+      "r": 128
     },
     "cornerRadius": 81,
-    "cameraSource": "半径与避让宽度来自系统官方背屏主题注释（https://github.com/wmqc97/maml-backscreen-theme-skill）及 REAREye 实测；Pro Max 圆心与圆角取自 17 Pro Max 三维模型；17 Pro / 18 Pro 圆心按官方避让宽度推算。"
+    "cameraSource": "镜头圆心与半径取自小米官方预装背屏主题“涡核时轨”按机型制作的背景：17 Pro 用 Q200.mp4，Pro Max 用 P2.mp4（18 Pro Max 固件里是同一文件），18 Pro 用 hongkong/bg.mp4；去掉格纹后逐行拟合镜头圆盘左右边缘得到，残差约 2 像素（固件来自 dumps.tadiphone.dev 的 pandora、popsicle、hongkong、madrid）。四款机型的系统背屏挖孔配置 config_secondaryBuiltInDisplayCutout 都是左侧 296 像素，与镜头圆心左右对称；避让线 safeLeft 也取这 296 像素。官方主题注释的镜片半径：Pro Max 102，17 Pro / 18 Pro 98（https://github.com/wmqc97/maml-backscreen-theme-skill）。"
   },
   {
     "id": "xiaomi-17-pro-max",
@@ -29,15 +29,15 @@
     "source": "https://antutu.com/doc/135320",
     "product": "https://www.mi.com/prod/xiaomi-17-pro-max",
     "camera": {
-      "x": 152,
+      "x": 147,
       "ys": [
-        151,
-        451
+        149,
+        447
       ],
-      "r": 102
+      "r": 131
     },
     "cornerRadius": 84,
-    "cameraSource": "半径与避让宽度来自系统官方背屏主题注释（https://github.com/wmqc97/maml-backscreen-theme-skill）及 REAREye 实测；Pro Max 圆心与圆角取自 17 Pro Max 三维模型；17 Pro / 18 Pro 圆心按官方避让宽度推算。"
+    "cameraSource": "镜头圆心与半径取自小米官方预装背屏主题“涡核时轨”按机型制作的背景：17 Pro 用 Q200.mp4，Pro Max 用 P2.mp4（18 Pro Max 固件里是同一文件），18 Pro 用 hongkong/bg.mp4；去掉格纹后逐行拟合镜头圆盘左右边缘得到，残差约 2 像素（固件来自 dumps.tadiphone.dev 的 pandora、popsicle、hongkong、madrid）。四款机型的系统背屏挖孔配置 config_secondaryBuiltInDisplayCutout 都是左侧 296 像素，与镜头圆心左右对称；避让线 safeLeft 也取这 296 像素。官方主题注释的镜片半径：Pro Max 102，17 Pro / 18 Pro 98（https://github.com/wmqc97/maml-backscreen-theme-skill）。"
   },
   {
     "id": "xiaomi-18-pro",
@@ -45,19 +45,19 @@
     "series": "小米 18 系列",
     "width": 912,
     "height": 596,
-    "safeLeft": 0.278,
+    "safeLeft": 0.325,
     "source": "https://finance.sina.cn/tech/2026-09-23/detail-inisvumx0993132.d.html",
     "product": "https://www.mi.com/prod/xiaomi-18-pro",
     "camera": {
-      "x": 120,
+      "x": 146,
       "ys": [
-        154,
-        442
+        149,
+        448
       ],
-      "r": 98
+      "r": 118
     },
     "cornerRadius": 84,
-    "cameraSource": "半径与避让宽度来自系统官方背屏主题注释（https://github.com/wmqc97/maml-backscreen-theme-skill）及 REAREye 实测；Pro Max 圆心与圆角取自 17 Pro Max 三维模型；17 Pro / 18 Pro 圆心按官方避让宽度推算。"
+    "cameraSource": "镜头圆心与半径取自小米官方预装背屏主题“涡核时轨”按机型制作的背景：17 Pro 用 Q200.mp4，Pro Max 用 P2.mp4（18 Pro Max 固件里是同一文件），18 Pro 用 hongkong/bg.mp4；去掉格纹后逐行拟合镜头圆盘左右边缘得到，残差约 2 像素（固件来自 dumps.tadiphone.dev 的 pandora、popsicle、hongkong、madrid）。四款机型的系统背屏挖孔配置 config_secondaryBuiltInDisplayCutout 都是左侧 296 像素，与镜头圆心左右对称；避让线 safeLeft 也取这 296 像素。官方主题注释的镜片半径：Pro Max 102，17 Pro / 18 Pro 98（https://github.com/wmqc97/maml-backscreen-theme-skill）。"
   },
   {
     "id": "xiaomi-18-pro-max",
@@ -69,14 +69,14 @@
     "source": "https://finance.sina.cn/tech/2026-09-23/detail-inisvumx0993132.d.html",
     "product": "https://www.mi.com/prod/xiaomi-18-pro-max",
     "camera": {
-      "x": 152,
+      "x": 147,
       "ys": [
-        151,
-        451
+        149,
+        447
       ],
-      "r": 102
+      "r": 131
     },
     "cornerRadius": 84,
-    "cameraSource": "半径与避让宽度来自系统官方背屏主题注释（https://github.com/wmqc97/maml-backscreen-theme-skill）及 REAREye 实测；Pro Max 圆心与圆角取自 17 Pro Max 三维模型；17 Pro / 18 Pro 圆心按官方避让宽度推算。"
+    "cameraSource": "镜头圆心与半径取自小米官方预装背屏主题“涡核时轨”按机型制作的背景：17 Pro 用 Q200.mp4，Pro Max 用 P2.mp4（18 Pro Max 固件里是同一文件），18 Pro 用 hongkong/bg.mp4；去掉格纹后逐行拟合镜头圆盘左右边缘得到，残差约 2 像素（固件来自 dumps.tadiphone.dev 的 pandora、popsicle、hongkong、madrid）。四款机型的系统背屏挖孔配置 config_secondaryBuiltInDisplayCutout 都是左侧 296 像素，与镜头圆心左右对称；避让线 safeLeft 也取这 296 像素。官方主题注释的镜片半径：Pro Max 102，17 Pro / 18 Pro 98（https://github.com/wmqc97/maml-backscreen-theme-skill）。"
   }
 ]

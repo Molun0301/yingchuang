@@ -311,7 +311,7 @@ def read_scene(source):
     return pkg, project, scene, sw, sh, props
 
 
-def world_transforms(objects, props, sw, sh, notes):
+def world_transforms(objects, props, sw, sh, notes, *, include_hidden=False):
     """按父子关系合成平面变换和颜色，保留图层自身透明度。"""
     by_id = {o["id"]: o for o in objects}
     if len(by_id) != len(objects):
@@ -323,7 +323,7 @@ def world_transforms(objects, props, sw, sh, notes):
         obj_id = obj["id"]
         if obj_id in cache:
             return cache[obj_id]
-        if not visible(obj, props):
+        if not include_hidden and not visible(obj, props):
             cache[obj_id] = None
             return None
         if obj_id in visiting or len(visiting) >= 100:
@@ -603,8 +603,10 @@ def add_widget(line,row):
     total=f"yc_{row['key']}_W"
     element(line,"Var",name=total,expression="+".join(widths))
     edge="0" if row.get("align")=="left" else f"-#{total}" if row.get("align")=="right" else f"-#{total}/2"
-    align={"h":f"{row['h']}*#clock_unit","align":"center","alignV":"center","antiAlias":"true"}
+    margin=2*row.get("pad",0)
+    align={"h":f"{row['h']+margin}*#clock_unit","align":"center","alignV":"center","antiAlias":"true"}
     def image(src,x,w,**attrs):
+        if margin:w+=f"+{margin}"
         element(line,"Image",src=src,x=f"({x})*#clock_unit",y="0",w=f"({w})*#clock_unit",**align,**attrs)
     for (seg,variables,_),width in zip(parts,widths):
         if seg["t"]=="s":image(seg["asset"],f"{edge}+{width}/2",width)
@@ -645,16 +647,17 @@ def add_clock(root, layout, config):
             if "segments" in row:
                 add_widget(line,row)
                 continue
-            align = {"h": f"{row['h']}*#clock_unit", "align": "center", "alignV": "center", "antiAlias": "true"}
+            margin = 2*row.get("pad",0)
+            align = {"h": f"{row['h']+margin}*#clock_unit", "align": "center", "alignV": "center", "antiAlias": "true"}
             if key == "week":
-                element(line, "Image", x="0", y="0", w=f"{row['w']}*#clock_unit",src="assets/clock_week.png",srcid="max(0,min(6,#day_of_week-1))",**align)
+                element(line, "Image", x="0", y="0", w=f"{row['w']+margin}*#clock_unit",src="assets/clock_week.png",srcid="max(0,min(6,#day_of_week-1))",**align)
                 continue
             for part in row["pieces"]:
                 expression = digit_expression(part["digit"]) if "digit" in part else None
                 if expression and row.get("hourFormat") == "12":
                     expression = expression.replace("#hour24", "ifelse(eq(#hour24%12,0),12,#hour24%12)")
                 attrs = {"src":part["asset"]} if "asset" in part else {"src":f"assets/clock_{key}_num.png","srcid":expression}
-                element(line,"Image",x=f"{number(part['x'])}*#clock_unit",y="0",w=f"{part['w']}*#clock_unit",**attrs,**align)
+                element(line,"Image",x=f"{number(part['x'])}*#clock_unit",y="0",w=f"{part['w']+margin}*#clock_unit",**attrs,**align)
         return
     margin, half_width = layout["margin"], layout["half_width"]
     left = f"#view_width*{number(config['避让左侧比例'])}"
@@ -668,16 +671,17 @@ def add_clock(root, layout, config):
     for row in layout["rows"]:
         key = row["key"]
         line = element(group, "Group", name=f"clock_{key}", x="0", y=f"{number(row['y'])}*#clock_unit")
-        align = {"h": f"{row['h']}*#clock_unit", "align": "center", "alignV": "center", "antiAlias": "true"}
+        padding = 2*row.get("pad",0)
+        align = {"h": f"{row['h']+padding}*#clock_unit", "align": "center", "alignV": "center", "antiAlias": "true"}
         if key == "week":
-            element(line, "Image", x="0", y="0", w=f"{row['w']}*#clock_unit",
+            element(line, "Image", x="0", y="0", w=f"{row['w']+padding}*#clock_unit",
                     src="assets/clock_week.png", srcid="max(0,min(6,#day_of_week-1))", **align)
             continue
         for part in row["pieces"]:
             attrs = {"src": part["asset"]} if "asset" in part else {
                 "src": f"assets/clock_{key}_num.png", "srcid": digit_expression(part["digit"])}
             element(line, "Image", x=f"{number(part['x'])}*#clock_unit", y="0",
-                    w=f"{part['w']}*#clock_unit", **attrs, **align)
+                    w=f"{part['w']+padding}*#clock_unit", **attrs, **align)
 
 
 def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
@@ -932,7 +936,7 @@ def picture_layers(source, stage, config):
         return width,height,[layer],["图片帧动画"]
 
 
-def write_product(stage, sw, sh, layers, config, name, restored, notes, details, source_type, clock=None, background="#061633"):
+def write_product(stage, sw, sh, layers, config, name, restored, notes, details, source_type, clock=None, background="#061633", *, package=None):
     manifest=make_manifest(sw,sh,layers,config,clock,background)
     (stage/"manifest.xml").write_bytes(manifest)
     title=name+(" · 动效背屏" if restored else " · 感应背屏")
@@ -973,8 +977,9 @@ def write_product(stage, sw, sh, layers, config, name, restored, notes, details,
             "字体来源":clock["fonts"] if clock else {}, "配置":config}
     (stage/"转换报告.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
     (stage/"配置.json").write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding="utf-8")
-    filename=re.sub(r'[<>:"/\\|?*\x00-\x1f]',"_",name).strip(". ")[:80] or "壁纸"
-    package=stage/(filename+"_背屏.mrc")
+    if package is None:
+        filename=re.sub(r'[<>:"/\\|?*\x00-\x1f]',"_",name).strip(". ")[:80] or "壁纸"
+        package=stage/(filename+"_背屏.mrc")
     with zipfile.ZipFile(package,"w",zipfile.ZIP_DEFLATED) as z:
         for file in sorted((stage/"assets").iterdir()):
             if file.is_file():

@@ -3,10 +3,20 @@ const http=require('node:http');
 const fs=require('node:fs/promises');
 const {createReadStream}=require('node:fs');
 const path=require('node:path');
-const aliases={bootstrap:'bootstrap',refresh:'refresh',detail:'detail',fonts:'fonts',saveDraft:'save-draft',livePatch:'live-patch',preview:'preview',previewMotion:'preview-motion',prefetch:'prefetch',clock:'clock',cancelPreview:'cancel-preview',favorite:'favorite',saveTemplate:'save-template',deleteTemplate:'delete-template',applyTemplate:'apply-template',settings:'settings',chooseDirectory:'choose-directory',removeDirectory:'remove-directory',chooseFile:'choose-file',enqueue:'enqueue',cancelQueue:'cancel-queue',clearQueue:'clear-queue',openTheme:'open-theme',openOutput:'open-output',windowControl:'window-control'};
+const aliases={bootstrap:'bootstrap',refresh:'refresh',detail:'detail',fonts:'fonts',saveProject:'save-project',
+  livePatch:'live-patch',preview:'preview',previewMotion:'preview-motion',prefetch:'prefetch',clock:'clock',cancelPreview:'cancel-preview',
+  layerThumbnails:'layer-thumbnails',favorite:'favorite',saveTemplate:'save-template',renameTemplate:'rename-template',
+  deleteTemplate:'delete-template',applyTemplate:'apply-template',settings:'settings',chooseDirectory:'choose-directory',
+  removeDirectory:'remove-directory',chooseFile:'choose-file',enqueue:'enqueue',cancelQueue:'cancel-queue',clearQueue:'clear-queue',
+  showBuild:'show-build',openOutput:'open-output',buildReport:'build-report',buildPreview:'build-preview',removeBuild:'remove-build',
+  openTheme:'open-theme',openWorkshop:'open-workshop',windowControl:'window-control',updateCheck:'update-check',
+  updateChangelog:'update-changelog',updateDownload:'update-download',updateCancel:'update-cancel',updateInstall:'update-install',
+  updateSettings:'update-settings',openRelease:'open-release'};
+const subscriptions={onQueue:'queue-change',onLibrary:'library-change',onBuilds:'builds-change',
+  onPreviewProgress:'preview-progress',onPreviewReady:'preview-ready',onUpdate:'update'};
 function start({port,handlers,roots,dist}){
   const clients=new Set();
-  const bridge=`const events=new EventSource('/events');window.yingchuang={};for(const [key,name] of Object.entries(${JSON.stringify(aliases)})){window.yingchuang[key]=async(...args)=>{const res=await fetch('/api/'+name,{method:'POST',headers:{'Content-Type':'application/json','X-Yingchuang-Preview':'1'},body:JSON.stringify(args)});const data=await res.json();if(!res.ok)throw new Error(data.error);return data;};}for(const [key,name] of Object.entries({onQueue:'queue-change',onPreviewProgress:'preview-progress',onPreviewReady:'preview-ready'})){window.yingchuang[key]=callback=>{const listener=e=>callback(JSON.parse(e.data));events.addEventListener(name,listener);return()=>events.removeEventListener(name,listener);};}`;
+  const bridge=`const events=new EventSource('/events');window.yingchuang={};for(const [key,name] of Object.entries(${JSON.stringify(aliases)})){window.yingchuang[key]=async(...args)=>{const res=await fetch('/api/'+name,{method:'POST',headers:{'Content-Type':'application/json','X-Yingchuang-Preview':'1'},body:JSON.stringify(args)});const data=await res.json();if(!res.ok)throw new Error(data.error);return data;};}for(const [key,name] of Object.entries(${JSON.stringify(subscriptions)})){window.yingchuang[key]=callback=>{const listener=e=>callback(JSON.parse(e.data));events.addEventListener(name,listener);return()=>events.removeEventListener(name,listener);};}`;
   const types={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.svg':'image/svg+xml','.mp4':'video/mp4','.webm':'video/webm','.mov':'video/quicktime'};
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,'http://127.0.0.1:'+port);

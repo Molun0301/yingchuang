@@ -1,5 +1,8 @@
 name: Windows 界面与转换检查
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 permissions:
   contents: read

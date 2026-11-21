@@ -268,7 +268,9 @@ async function load(input: LiveLoad, lut?: LutGrid) {
     post({ type: 'ready', info: created.info && { ...created.info, maxMotion: Math.max(1, ...parallaxNodes.filter(node => node.drawn).map(node => node.motion)) }, ms: Math.round(performance.now() - started) });
     return created;
   } catch (error) {
-    if (serial === loadSerial) post({ type: 'error', message: (error as Error).message });
+    // 场景包读取被有意转给目录读取器；目录里也读不到场景文件时，渲染库会把这个转交原因带出来。
+    const message = (error as Error).message.includes('场景改由目录读取器装配') ? '读不到壁纸的场景文件，壁纸可能不完整或已损坏。' : (error as Error).message;
+    if (serial === loadSerial) post({ type: 'error', message });
     const attached = (error as { instance?: SceneInstance }).instance;
     attached?.destroy({ releasePkgCache: true });
     throw error;
