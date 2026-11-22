@@ -672,9 +672,9 @@ async function bake(bridge: RecorderBridge, job: RecordJob) {
       for (const member of together) for (let id = parents.get(member); id != null; id = parents.get(id) ?? null) ancestors.add(id);
       for (const layer of layers) {
         const props = original.get(layer.id);
-        // 图片类上级的透明度不传给子层，设为 0 只隐藏自身；合成层、全屏层等把子层画进自身缓冲，需保持原透明度。
+        // 图片和骨骼上级的透明度不传给子层，设为 0 只隐藏自身；合成层、全屏层等把子层画进自身缓冲，需保持原透明度。
         if (together.has(layer.id)) await control.setLayerProps(layer.id, { visible: props?.visible ?? true, alpha: props?.alpha ?? 1 });
-        else if (ancestors.has(layer.id)) await control.setLayerProps(layer.id, { visible: props?.visible ?? true, alpha: layer.kind === 'image' ? 0 : props?.alpha ?? 1 });
+        else if (ancestors.has(layer.id)) await control.setLayerProps(layer.id, { visible: props?.visible ?? true, alpha: layer.kind === 'image' || layer.kind === 'model' ? 0 : props?.alpha ?? 1 });
         else if (layer.visible) await control.setLayerProps(layer.id, { visible: false });
       }
       let single = !!job.particles?.includes(target);

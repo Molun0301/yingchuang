@@ -588,15 +588,13 @@ def render_baked(assets, record, layer, grade, key, static, pixel_budget=None):
     size = width,height
     indices = [0]
     if not static:
-        step = max(1,math.ceil(width*height*count/pixel_budget))
-        indices = range(0,count,step)
-        minimum = min(12,count)
-        if len(indices)<minimum:
-            # 达到帧数下限后用整数索引均匀取样，仍覆盖原来的完整周期。
-            indices = [i*count//minimum for i in range(minimum)]
+        n = min(count,max(min(12,count),pixel_budget//(width*height)))
+        indices = [i*count//n for i in range(n)]
         if width*height*len(indices)>pixel_budget:
             scale = min(1,max(32/min(width,height),math.sqrt(pixel_budget/(width*height*len(indices)))))
             size = max(min(32,width),int(width*scale)),max(min(32,height),int(height*scale))
+    blend = any(b-a>1 for a,b in zip(indices,indices[1:]))
+    alphas = []
     def frames():
         frame_bytes = width*height*4
         with gzip.open(Path(record["dir"])/"frames.rgba.gz","rb") as source:
@@ -604,7 +602,12 @@ def render_baked(assets, record, layer, grade, key, static, pixel_budget=None):
                 source.seek(index*frame_bytes)
                 frame = Image.frombytes("RGBA",(width,height),source.read(frame_bytes))
                 if frame.size!=size:frame=frame.resize(size,Image.Resampling.LANCZOS)
-                yield finish_frame(frame,layer,grade)
+                frame = finish_frame(frame,layer,grade)
+                if blend:
+                    alpha = frame.getchannel("A")
+                    alpha.thumbnail((256,256),Image.Resampling.LANCZOS)
+                    alphas.append(np.asarray(alpha,dtype=np.float32)/255)
+                yield frame
     if static:
         layer["image"]=next(frames())
         layer["asset"]=assets.write(key,layer["image"])
@@ -613,6 +616,15 @@ def render_baked(assets, record, layer, grade, key, static, pixel_budget=None):
         layer["sequence"]=assets.sequence(key,frames(),period)
         # 预算抽帧可能留下不等间隔的索引，保留原时间点，逐层周期与小数帧率都不被均分改变。
         layer["sequence"]["times"]=[round(index/record["fps"]*1000) for index in indices]
+        if blend:
+            # 按旧帧透明度的平方加权，拟合整段循环的旧帧淡出量。
+            num = den = 0.
+            for a,b in zip(alphas,alphas[1:]+alphas[:1]):
+                w = a*a
+                num += np.sum(w*(1-b)*(1/3-b/4),dtype=np.float64)
+                den += np.sum(w*(1/3-b/2+b*b/5),dtype=np.float64)
+            layer["sequence"]["blend"]=True
+            layer["sequence"]["blend_out"]=round(min(1.,max(0.,float(num/den))),2) if den else 0
         layer["asset"]=layer["sequence"]["frames"][0]
         with Image.open(assets.stage/layer["asset"]) as image:layer["image"]=image.convert("RGBA")
 
@@ -648,6 +660,20 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
     # 骨骼与帧图集动画没有单独预算，排在后面时会被前面的图层用尽；分配份额时把它们也算作待处理层。
     pending_frames = sum(str(layer["id"]) not in baked and bool(layer.get("puppet") or layer.get("atlas"))
                          and not any(kind in WARP_EFFECTS for kind,_ in object_specs.get(layer["id"], [])) for layer in layers)
+    baked_costs={}
+    for identifier,static in baked_static.items():
+        if not static:
+            record=baked[str(identifier)]
+            baked_costs[identifier]=record["width"]*record["height"]*record["count"]
+    # 先为非烘焙动画留出份额，再把小层用不完的预算分给大层。
+    pool=.88*ANIMATION_PIXEL_LIMIT
+    pending_native=pending_surfaces+pending_frames
+    remaining_baked=int(pool-pool*pending_native/max(1,pending_baked+pending_native))
+    baked_budgets={}
+    for index,(identifier,cost) in enumerate(sorted(baked_costs.items(),key=lambda item:item[1])):
+        budget=min(cost,remaining_baked//(pending_baked-index))
+        baked_budgets[identifier]=budget
+        remaining_baked-=budget
     if grade!=(0,0):
         restored.append("全局亮度和对比度")
     for index,obj in enumerate(objects):
@@ -669,11 +695,8 @@ def build_motion_scene(package, scene, properties, layers, worlds, stage, decode
             layer={"id":obj["id"],"name":name,"x":bx+bw/2,"y":by+bh/2,"w":bw,"h":bh,"rotation":0,"flip_y":False,
                    "motion":min(2.,max(.2,1+depth*.45)),"source_depth":depth,"opacity":1,"color":[1,1,1]}
             if obj.get("_luts"):layer["_luts"]=obj["_luts"]
-            budget=None
-            if not baked_static[obj["id"]]:
-                budget=int(.88*(ANIMATION_PIXEL_LIMIT-assets.animated_pixels)/max(1,pending_baked+pending_surfaces+pending_frames))
-                pending_baked-=1
-            render_baked(assets,record,layer,grade,key,baked_static[obj["id"]],budget)
+            if not baked_static[obj["id"]]:pending_baked-=1
+            render_baked(assets,record,layer,grade,key,baked_static[obj["id"]],baked_budgets.get(obj["id"]))
             result.append(layer)
             restored.append("逐层完整渲染")
         elif base is not None:

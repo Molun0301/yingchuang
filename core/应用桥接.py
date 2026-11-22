@@ -27,7 +27,7 @@ from 场景动效 import ASSET_ERRORS, SceneAssets, atlas_frames, build_motion_s
 if os.environ.get("YINGCHUANG_CORE"):
     converter.ROOT = Path(os.environ["YINGCHUANG_CORE"])
 
-CACHE_VERSION = 13
+CACHE_VERSION = 14
 ROLE_KEYS = dict(zip(clockwork.ROLES, ("week", "date", "time")))
 
 
@@ -668,6 +668,12 @@ def selected_clock_fonts(theme,project):
     if theme["type"] == "scene" and flat_scene(theme):
         pkg,_,scene,sw,sh,props = loaded_scene(theme,project)
         worlds = converter.world_transforms(scene["objects"],props,sw,sh,[])
+        visible_ids=converter.visible_objects(scene["objects"],props)
+        for obj in scene["objects"]:
+            identifier=obj["id"]
+            if identifier in visible_ids and worlds.get(identifier) is None:
+                text=converter.value(obj.get("text"))
+                if isinstance(text,str) and clockwork.clock_roles(obj,text[:512]):worlds[identifier]={"alpha":1}
         original_theme={k:v for k,v in theme.items() if k not in {"resolvedScene","scriptResult"}}
         _,_,original_scene,ow,oh,original_props = loaded_scene(original_theme,{})
         original_worlds=converter.world_transforms(original_scene["objects"],original_props,ow,oh,[])
@@ -700,8 +706,8 @@ def prepare_clock(request,config):
     auto_format = config["时制"]=="auto"
     if auto_format:config["时制"]="24"
     if theme["type"]=="scene" and flat_scene(theme):
-        pkg,_,scene,w,h,props=loaded_scene(theme,project)
-        worlds=converter.world_transforms(scene["objects"],props,w,h,[])
+        _,_,scene,_,_,props=loaded_scene(theme,project)
+        visible_ids=converter.visible_objects(scene["objects"],props)
         candidates={key:[] for key in ROLE_KEYS.values()}
         for obj in scene["objects"]:
             if "text" not in obj:continue
@@ -710,7 +716,7 @@ def prepare_clock(request,config):
             for role in clockwork.clock_roles(obj,raw):candidates[ROLE_KEYS[role]].append((obj,raw))
         for key,entries in candidates.items():
             if entries:
-                active=[(obj,text) for obj,text in entries if worlds.get(obj["id"]) is not None and text.strip()]
+                active=[(obj,text) for obj,text in entries if obj["id"] in visible_ids and text.strip()]
                 config["时钟排版"][key]["sourceVisible"]=bool(active)
                 config["时钟排版"][key]["visible"]=config["时钟排版"][key]["visible"] and bool(active)
                 if key=="time" and auto_format and active:

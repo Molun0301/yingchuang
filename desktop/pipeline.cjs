@@ -136,7 +136,7 @@ function createPipeline({ userData, workers, resources, liveTheme, recorder, des
   // 逐层烘焙：每秒十五帧观察最多十二秒，检出周期后独立定时；未检出时沿用四秒与半秒淡化。
   // version 随烘焙算法变化递增，使旧缓存失效。
   // 十二秒观察为最长十一秒的候选留出至少一秒复核；完整帧缓存仍只有四秒加淡化。
-  const BAKE={fps:15,seconds:4,maxSeconds:12,fade:.5,warmup:1,version:10};
+  const BAKE={fps:15,seconds:4,maxSeconds:12,fade:.5,warmup:1,version:11};
   /**
    * 逐层烘焙。不随时段变化的图层按当前时刻渲染；随时段变化的图层在各状态的代表时刻分别渲染。
    * 返回 {baked, byScene}：byScene[场景下标][对象编号] 为该时段变体的烘焙记录。

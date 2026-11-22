@@ -72,6 +72,32 @@ def test_v2_project_config_and_clock_apply_widget_settings(tmp_path):
     assert bridge.prepare_clock(request,config)==(None,None)
 
 
+@pytest.mark.parametrize('property_visible,parent_visible,text,expected',[
+    (True,True,'12:34',True),(False,True,'12:34',False),(True,False,'12:34',False),(True,True,' ',False),
+])
+def test_rotated_source_time_uses_visibility_and_font(tmp_path,property_visible,parent_visible,text,expected):
+    scene={'general':{'orthogonalprojection':{'width':200,'height':100}},'objects':[
+        {'id':478,'name':'时间','parent':1,'text':text,'font':'font.ttf','angles':'0 1.01229 0',
+         'visible':{'user':'newproperty','value':True}},
+        {'id':1,'visible':parent_visible}]}
+    source=tmp_path/'scene.json';source.write_text(json.dumps(scene),encoding='utf-8')
+    props={'newproperty':{'value':property_visible}}
+    (tmp_path/'project.json').write_text(json.dumps({'general':{'properties':props}}),encoding='utf-8')
+    data=font_data();(tmp_path/'font.ttf').write_bytes(data)
+    scratch=tmp_path/'scratch';scratch.mkdir()
+    project=project_for()
+    theme={'type':'scene','source':str(source),'resolvedScene':scene}
+    request={'project':project,'theme':theme,'cacheRoot':str(tmp_path/'cache'),'scratchRoot':str(scratch)}
+    config=bridge.config_for(project,{'width':976,'height':596,'name':'测试机型'})
+    assert converter.world_transforms(scene['objects'],props,200,100,[])[478] is None
+    _,clock=bridge.prepare_clock(request,config)
+    for row in (config['时钟排版']['time'],widget_for(clock['rows'],'time')):
+        assert row['sourceVisible'] is expected and row['visible'] is expected
+    if expected:
+        assert clock['fonts']['时间']['源图层']==[{'编号':478,'名称':'时间'}]
+        assert clock['fonts']['时间']['SHA-256']==sha256(data).hexdigest()
+
+
 def test_font_without_digits_keeps_time_with_fallback(tmp_path):
     with TTFont(BytesIO(font_data())) as font:
         reduced=subset.Subsetter();reduced.populate(text='ABCDEFGHIJKLMNOPQRSTUVWXYZ: .');reduced.subset(font)

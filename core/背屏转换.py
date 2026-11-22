@@ -270,6 +270,25 @@ def visible(obj, props):
     return bool(v.get("value", True))
 
 
+def visible_objects(objects, props):
+    """沿父子关系判断可见性，供无需计算几何变换的文字组件使用。"""
+    identifiers = {obj["id"] for obj in objects}
+    children, pending = {}, []
+    for obj in objects:
+        parent = obj.get("parent")
+        if parent in identifiers:
+            children.setdefault(parent, []).append(obj)
+        else:
+            pending.append(obj)
+    result = set()
+    while pending:
+        obj = pending.pop()
+        if visible(obj, props):
+            result.add(obj["id"])
+            pending.extend(children.get(obj["id"], ()))
+    return result
+
+
 def scene_background(scene):
     """场景底色：电脑上各图层透明处露出的颜色，未设置时渲染器按黑色清屏。"""
     general = scene.get("general", {})
@@ -534,6 +553,11 @@ def xml_bytes(root):
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+def sequence_times(sequence):
+    duration, count = sequence["period"], len(sequence["frames"])
+    return sequence.get("times", [round(duration*i/count) for i in range(count)]) + [duration]
+
+
 def add_layer_animation(node, layer):
     sequence = layer.get("sequence")
     if sequence and len(sequence["frames"]) > 1:
@@ -543,10 +567,8 @@ def add_layer_animation(node, layer):
             node.set("src", first.with_name(first.stem.rsplit("_", 1)[0] + first.suffix).as_posix())
             node.set("srcid", f"round((#move_x+1)*{number((len(frames)-1)/2)})")
         else:
-            duration = sequence["period"]
-            times = sequence.get("times", [round(duration*i/len(frames)) for i in range(len(frames))])
             animation = element(node, "SourcesAnimation", loop="true")
-            for file, at in zip(frames + frames[:1], times + [duration]):
+            for file, at in zip(frames + frames[:1], sequence_times(sequence)):
                 element(animation, "Source", x="0", y="0", src=file, time=at)
     if layer.get("travel"):
         animation = element(node, "PositionAnimation", loop="true")
@@ -778,13 +800,36 @@ def make_manifest(sw, sh, layers, c, clock=None, background="#061633"):
                 element(trigger,"VideoCommand",target=target,command="pause",condition=f"eq(#{variable},0)")
             continue
         parent=element(root,"Group",name="time_"+str(layer["id"]),alpha=f"255*({alpha})") if alpha is not None else root
-        image = element(parent, "Image", name="layer_" + str(layer["id"]), src=layer["asset"],
+        sequence=layer.get("sequence",{})
+        blend=sequence.get("blend") and sequence.get("mode")!="tilt"
+        blend_out=sequence.get("blend_out",0) if blend else 0
+        name="layer_"+str(layer["id"])
+        base=element(parent,"Group",name=name+"_base") if blend_out>0 else parent
+        image = element(base, "Image", name=name, src=layer["asset"],
                 x=position_x, y=position_y,
                 w=f"{w}*#scene_scale", h=f"{h}*#scene_scale",
                 align="center", alignV="center", rotation=rotation,
                 pivotX=f"({w})*#scene_scale/2" if curve else f"{number(layer['w']/2)}*#scene_scale",
                 pivotY=f"({h})*#scene_scale/2" if curve else f"{number(layer['h']/2)}*#scene_scale")
         add_layer_animation(image, layer)
+        if blend:
+            frames=sequence["frames"]
+            group=element(parent,"Group",name=name+"_blend")
+            overlay=element(group,"Image",**{**image.attrib,"name":name+"_next","src":frames[1]})
+            add_layer_animation(overlay,{**layer,"sequence":{**sequence,"frames":frames[1:]+frames[:1]}})
+            animation=element(group,"AlphaAnimation",loop="true")
+            times=sequence_times(sequence)
+            for at,end in zip(times,times[1:]):
+                element(animation,"Item",value=0,time=at)
+                element(animation,"Item",value=255,time=end-1)
+            element(animation,"Item",value=0,time=sequence["period"])
+            if blend_out>0:
+                animation=element(base,"AlphaAnimation",loop="true")
+                faded=round(255*(1-blend_out))
+                for at,end in zip(times,times[1:]):
+                    element(animation,"Item",value=255,time=at)
+                    element(animation,"Item",value=faded,time=end-1)
+                element(animation,"Item",value=255,time=sequence["period"])
     if clock is not None:
         add_clock(root, clock, c)
     # 点击可见区域重新居中；不绘制按钮文字，画面保持简洁。

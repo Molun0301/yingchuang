@@ -200,6 +200,7 @@ def test_baked_frames_replace_layers_and_export_with_bbox(scene_request,tmp_path
         'x':16,'y':18,'w':38,'h':26,'rotation':0,'flip_y':False,'opacity':1,'color':[1,1,1]}
     assert dynamic['motion']==1.9 and dynamic['source_depth']==2
     assert len(dynamic['sequence']['frames'])==20 and dynamic['sequence']['period']==2000
+    assert 'blend' not in dynamic['sequence'] and 'blend_out' not in dynamic['sequence']
     assert len(list((root/'assets').iterdir()))==21
     assert '逐层完整渲染' in payload['restored']
     with Image.open(root/dynamic['asset']) as image:
@@ -211,6 +212,7 @@ def test_baked_frames_replace_layers_and_export_with_bbox(scene_request,tmp_path
         node=manifest.find("Image[@name='layer_2']")
         assert node.get('w')=='38*#scene_scale' and node.get('h')=='26*#scene_scale'
         assert {source.get('src') for source in node.findall('SourcesAnimation/Source')}==set(dynamic['sequence']['frames'])
+        assert manifest.find("Group[@name='layer_2_blend']") is None
         assert set(dynamic['sequence']['frames'])<=set(package.namelist())
     assert Image.open(Path(result['folder'])/'画面预览.jpg').size==(320,240)
 
@@ -223,12 +225,43 @@ def test_baked_animation_reduces_frames_then_size_within_budget(scene_request,tm
     root,payload=bridge.prepare_graphics(scene_request)
     sequence=payload['layers'][1]['sequence']
     assert 12<=len(sequence['frames'])<20 and sequence['period']==2000
+    assert sequence['blend'] is True
     pixels=0
     for path in sequence['frames']:
         with Image.open(root/path) as image:
             pixels+=image.width*image.height
             if min(size)>=32:assert min(image.size)>=32 and image.width<size[0] and image.height<size[1]
     assert pixels<=int(limit*.88)
+
+
+def test_baked_budget_keeps_all_affordable_frames(scene_request,tmp_path,monkeypatch):
+    scene_request['baked']={'2':baked_frames(tmp_path,'动态',size=(40,44),count=60)}
+    # 单层可用预算为 39600 像素，正好是单帧的 22.5 倍。
+    monkeypatch.setattr(motion,'ANIMATION_PIXEL_LIMIT',45_000)
+    _,payload=bridge.prepare_graphics(scene_request)
+    sequence=payload['layers'][1]['sequence']
+    assert len(sequence['frames'])==22 and sequence['blend'] is True
+
+
+@pytest.mark.parametrize('opaque,expected',[(False,1),(True,0)])
+def test_baked_blend_out_uses_retained_frame_alphas_across_loop(scene_request,tmp_path,monkeypatch,opaque,expected):
+    folder=tmp_path/'淡化帧';folder.mkdir()
+    size,count=(20,16),24
+    with gzip.open(folder/'frames.rgba.gz','wb') as stream:
+        for index in range(count):
+            alpha=255 if opaque or index==count-1 else 0
+            image=Image.new('RGBA',size,(index*10,80,120,alpha))
+            # 透明组只有最后一张保留帧含可见像素，必须计入它到首帧的过渡。
+            if not opaque and index==count-2:
+                image.paste((220,80,120,128),(0,0,10,16))
+            stream.write(image.tobytes())
+    scene_request['baked']={'2':{'dir':str(folder),'width':size[0],'height':size[1],
+                                 'count':count,'fps':10.,'bbox':[7,11,*size]}}
+    monkeypatch.setattr(motion,'ANIMATION_PIXEL_LIMIT',5000)
+    _,payload=bridge.prepare_graphics(scene_request)
+    sequence=payload['layers'][1]['sequence']
+    assert sequence['times']==[i*count//13*100 for i in range(13)]
+    assert sequence['blend'] is True and sequence['blend_out']==expected
 
 
 def test_baked_layers_share_remaining_animation_budget(scene_request,tmp_path,monkeypatch):
@@ -241,6 +274,25 @@ def test_baked_layers_share_remaining_animation_budget(scene_request,tmp_path,mo
         for path in layer['sequence']['frames']:
             with Image.open(root/path) as image:pixels+=image.width*image.height
     assert pixels<=40_000
+
+
+def test_baked_budget_fills_small_layer_before_larger_layer(scene_request,tmp_path,monkeypatch):
+    scene_request['baked']={'1':baked_frames(tmp_path,'大层',count=60),
+                            '2':baked_frames(tmp_path,'小层',size=(20,16))}
+    monkeypatch.setattr(motion,'ANIMATION_PIXEL_LIMIT',80_000)
+    root,payload=bridge.prepare_graphics(scene_request)
+    large,small=payload['layers']
+    assert [large['id'],small['id']]==[1,2]
+    # 小层拿满帧后，剩余的 64000 像素可保留大层的 53 帧。
+    assert len(large['sequence']['frames'])==53
+    assert len(small['sequence']['frames'])==20
+    pixels=0
+    for layer,size in [(large,(40,30)),(small,(20,16))]:
+        for path in layer['sequence']['frames']:
+            with Image.open(root/path) as image:
+                assert image.size==size
+                pixels+=image.width*image.height
+    assert pixels<=motion.ANIMATION_PIXEL_LIMIT
 
 
 def test_fast_baking_only_reads_first_frame_and_applies_global_grade(scene_request,tmp_path,monkeypatch):
@@ -344,13 +396,49 @@ def test_baked_layers_keep_individual_fractional_rates_in_preview_and_manifest(s
             assert sources[-1].get('src')==sources[0].get('src')
 
 
-def test_baked_budget_sampling_preserves_uneven_source_intervals(scene_request,tmp_path,monkeypatch):
+@pytest.mark.parametrize('fade_base',[False,True])
+def test_baked_budget_sampling_preserves_uneven_source_intervals(scene_request,tmp_path,monkeypatch,fade_base):
     record=baked_frames(tmp_path,'预算周期',count=29)
     record['fps']=29/1.937
     scene_request['baked']={'1':baked_frames(tmp_path,'静态',static=True),'2':record}
     monkeypatch.setattr(motion,'ANIMATION_PIXEL_LIMIT',15000)
     _,payload=bridge.prepare_graphics(scene_request)
-    seq=payload['layers'][1]['sequence']
+    layer=payload['layers'][1]
+    seq=layer['sequence']
     assert len(seq['frames'])==12 and seq['period']==1937
     assert seq['times']==[round((i*29//12)/record['fps']*1000) for i in range(12)]
     assert len(set(b-a for a,b in zip(seq['times'],seq['times'][1:])))>1
+    if not fade_base:seq['blend_out']=0
+    layer.update(time=[[0,0],[1440,1]],rotation=13,travel=[[0,0,0],[1937,4,7]],fade=[[0,128],[1937,200]])
+    config=bridge.config_for(scene_request['project'],scene_request['device'])
+    manifest=ET.fromstring(bridge.converter.make_manifest(payload['width'],payload['height'],[layer],config))
+    parent=manifest.find("Group[@name='time_2']")
+    base,group=list(parent)
+    if fade_base:
+        assert base.tag=='Group' and base.get('name')=='layer_2_base'
+        first=base.find('Image')
+    else:
+        first=base
+    assert (first.tag,first.get('name'),group.tag,group.get('name'))==('Image','layer_2','Group','layer_2_blend')
+    second=group.find('Image')
+    for key in ('x','y','w','h','rotation','pivotX','pivotY','align','alignV'):
+        assert second.get(key)==first.get(key)
+    for tag in ('PositionAnimation','AlphaAnimation'):
+        original,overlay=first.find(tag),second.find(tag)
+        assert overlay.attrib==original.attrib
+        assert [(item.tag,item.attrib) for item in overlay]==[(item.tag,item.attrib) for item in original]
+    times,frames=seq['times']+[seq['period']],seq['frames']
+    for image,expected in [(first,frames+frames[:1]),(second,frames[1:]+frames[:2])]:
+        animation=image.find('SourcesAnimation')
+        assert animation.get('loop')=='true'
+        assert [(int(source.get('time')),source.get('src')) for source in animation]==list(zip(times,expected))
+    alpha=group.find('AlphaAnimation')
+    assert alpha.get('loop')=='true'
+    assert [(int(item.get('time')),int(item.get('value'))) for item in alpha]==[
+        point for at,end in zip(times,times[1:]) for point in ((at,0),(end-1,255))]+[(seq['period'],0)]
+    if fade_base:
+        faded=round(255*(1-seq['blend_out']))
+        base_alpha=base.find('AlphaAnimation')
+        assert faded<255 and base_alpha.get('loop')=='true'
+        assert [(int(item.get('time')),int(item.get('value'))) for item in base_alpha]==[
+            point for at,end in zip(times,times[1:]) for point in ((at,255),(end-1,faded))]+[(seq['period'],255)]
