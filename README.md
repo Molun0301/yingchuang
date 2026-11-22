@@ -12,11 +12,11 @@
 ![平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20Linux-7a6cff)
 [![许可证](https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF%E8%AF%81-MIT-2ea44f)](LICENSE)
 
-[下载](#下载) · [功能](#功能) · [三步上手](#三步上手) · [常见问题](#常见问题) · [▶ 宣传片](https://www.bilibili.com/video/BV1JrWM6DE6N/)
+[下载](#下载) · [功能](#功能) · [三步上手](#三步上手) · [常见问题](#常见问题) · [▶ 宣传片](https://www.bilibili.com/video/BV1uGyVzmEh1/)
 
-<a href="https://www.bilibili.com/video/BV1JrWM6DE6N/"><img src="docs/assets/preview.webp" width="880" alt="逐层视差与随时段变化演示"></a>
+<a href="https://www.bilibili.com/video/BV1uGyVzmEh1/"><img src="docs/assets/preview.webp" width="880" alt="逐层烘焙与随时间变化演示"></a>
 
-[▶ 在 B 站观看完整宣传片](https://www.bilibili.com/video/BV1JrWM6DE6N/)
+[▶ 在 B 站观看完整宣传片](https://www.bilibili.com/video/BV1uGyVzmEh1/)
 
 </div>
 
